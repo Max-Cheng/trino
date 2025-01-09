@@ -412,8 +412,8 @@ public class PlanFragmenter
         public PlanNode visitValues(ValuesNode node, RewriteContext<FragmentProperties> context)
         {
             // An empty values node is compatible with any distribution, so
-            // don't attempt to overwrite one's already been chosen.
-            if (node.getRowCount() != 0) {
+            // don't attempt to overwrite one's already been chosen
+            if (node.getRowCount() != 0 || !context.get().hasDistribution()) {
                 context.get().setSingleNodeDistribution();
             }
             return context.defaultRewrite(node, context.get());
