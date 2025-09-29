@@ -32,7 +32,7 @@ public class StarrocksModule
     @Override
     public void configure(Binder binder)
     {
-        binder.bind(StarrocksConnctor.class).in(Scopes.SINGLETON);
+        binder.bind(StarrocksConnector.class).in(Scopes.SINGLETON);
         binder.bind(StarrocksClient.class).in(Scopes.SINGLETON);
         binder.bind(ConnectorSplitManager.class).to(StarrocksSplitManager.class).in(Scopes.SINGLETON);
         binder.bind(ConnectorPageSourceProvider.class).to(StarrocksPageSourceProvider.class).in(Scopes.SINGLETON);

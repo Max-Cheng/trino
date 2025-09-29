@@ -57,7 +57,6 @@ public class StarrocksPageSourceProvider
                 table.getSchemaTableName());
 
         beReader.openScanner(starrocksSplit.getTabletId(),
-
                 starrocksSplit.getOpaquedQueryPlan());
 
         return new StarrocksPageSource(beReader, columns);

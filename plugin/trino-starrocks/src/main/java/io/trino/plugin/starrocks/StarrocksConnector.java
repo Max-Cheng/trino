@@ -14,8 +14,8 @@
 package io.trino.plugin.starrocks;
 
 import com.google.inject.Inject;
-import io.airlift.log.Logger;
 import io.airlift.bootstrap.LifeCycleManager;
+import io.airlift.log.Logger;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorMetadata;
 import io.trino.spi.connector.ConnectorPageSinkProvider;
@@ -32,13 +32,12 @@ import static io.trino.spi.transaction.IsolationLevel.READ_COMMITTED;
 import static io.trino.spi.transaction.IsolationLevel.checkConnectorSupports;
 import static java.util.Objects.requireNonNull;
 
-public class StarrocksConnctor
+public class StarrocksConnector
         implements Connector
 {
-    private static final Logger log = Logger.get(StarrocksConnctor.class);
+    private static final Logger log = Logger.get(StarrocksConnector.class);
 
     private final LifeCycleManager lifeCycleManager;
-    private final StarrocksClient client;
     private final StarrocksMetadata metadata;
     private final StarrocksSplitManager splitManager;
     private final StarrocksPageSourceProvider pageSourceProvider;
@@ -47,14 +46,13 @@ public class StarrocksConnctor
     private final StarrocksTableProperties tableProperties;
 
     @Inject
-    public StarrocksConnctor(
+    public StarrocksConnector(
             LifeCycleManager lifeCycleManager,
             StarrocksClient client,
             StarrocksConfig config,
             StarrocksSessionProperties sessionProperties)
     {
         this.lifeCycleManager = requireNonNull(lifeCycleManager, "lifeCycleManager is null");
-        this.client = client;
         this.metadata = new StarrocksMetadata(client, config);
         this.splitManager = new StarrocksSplitManager(client);
         this.pageSourceProvider = new StarrocksPageSourceProvider(client);
@@ -85,7 +83,12 @@ public class StarrocksConnctor
     @Override
     public void shutdown()
     {
-        lifeCycleManager.stop();
+        try {
+            lifeCycleManager.stop();
+        }
+        catch (Exception e) {
+            log.error(e, "Error shutting down connector");
+        }
     }
 
     @Override

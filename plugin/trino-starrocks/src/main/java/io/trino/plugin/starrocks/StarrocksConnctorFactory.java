@@ -15,12 +15,18 @@ package io.trino.plugin.starrocks;
 
 import com.google.inject.Injector;
 import io.airlift.bootstrap.Bootstrap;
+import io.opentelemetry.api.OpenTelemetry;
+import io.trino.spi.Node;
+import io.trino.spi.VersionEmbedder;
+import io.trino.spi.catalog.CatalogName;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorContext;
 import io.trino.spi.connector.ConnectorFactory;
+import io.trino.spi.type.TypeManager;
 
 import java.util.Map;
 
+import static io.trino.plugin.base.Versions.checkStrictSpiVersionMatch;
 import static java.util.Objects.requireNonNull;
 
 public class StarrocksConnctorFactory
@@ -33,15 +39,25 @@ public class StarrocksConnctorFactory
     }
 
     @Override
-    public Connector create(String catalogName, Map<String, String> config, ConnectorContext context)
+    public Connector create(String catalogName, Map<String, String> requiredConfig, ConnectorContext context)
     {
-        requireNonNull(config, "config is null");
-        Bootstrap app = new Bootstrap(new StarrocksModule());
+        requireNonNull(requiredConfig, "requiredConfig is null");
+        checkStrictSpiVersionMatch(context, this);
+
+        Bootstrap app = new Bootstrap(
+                "io.trino.bootstrap.catalog." + catalogName,
+                binder -> binder.bind(TypeManager.class).toInstance(context.getTypeManager()),
+                binder -> binder.bind(Node.class).toInstance(context.getCurrentNode()),
+                binder -> binder.bind(VersionEmbedder.class).toInstance(context.getVersionEmbedder()),
+                binder -> binder.bind(OpenTelemetry.class).toInstance(context.getOpenTelemetry()),
+                binder -> binder.bind(CatalogName.class).toInstance(new CatalogName(catalogName)),
+                new StarrocksModule());
+
         Injector injector = app
                 .doNotInitializeLogging()
-                .setRequiredConfigurationProperties(config)
+                .setRequiredConfigurationProperties(requiredConfig)
                 .initialize();
 
-        return injector.getInstance(StarrocksConnctor.class);
+        return injector.getInstance(StarrocksConnector.class);
     }
 }

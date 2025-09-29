@@ -23,7 +23,6 @@ import java.util.List;
 
 import static io.trino.plugin.base.session.PropertyMetadataUtil.durationProperty;
 import static io.trino.spi.session.PropertyMetadata.integerProperty;
-import static io.trino.spi.session.PropertyMetadata.stringProperty;
 
 public class StarrocksSessionProperties
 {
@@ -46,11 +45,6 @@ public class StarrocksSessionProperties
                         TUPLE_DOMAIN_LIMIT,
                         "Maximum number of tuple domains to include in a single dynamic filter",
                         starrocksConfig.getTupleDomainLimit(),
-                        false),
-                stringProperty(
-                        DEFAULT_STREAM_LOAD_COMPRESSION,
-                        "Default Stream Load compression, e.g. none, gzip, bzip2, lz4_frame, zstd.",
-                        starrocksConfig.getDefaultStreamLoadCompression(),
                         false));
     }
 
@@ -62,11 +56,6 @@ public class StarrocksSessionProperties
     public static int getTupleDomainLimit(ConnectorSession session)
     {
         return session.getProperty(TUPLE_DOMAIN_LIMIT, Integer.class);
-    }
-
-    public static String getDefaultStreamLoadCompression(ConnectorSession session)
-    {
-        return session.getProperty(DEFAULT_STREAM_LOAD_COMPRESSION, String.class);
     }
 
     public List<PropertyMetadata<?>> getSessionProperties()

@@ -16,6 +16,7 @@ package io.trino.plugin.starrocks;
 
 import com.google.common.base.Stopwatch;
 import com.google.common.collect.ImmutableList;
+import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplitSource;
 
@@ -23,6 +24,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 
 import static io.trino.plugin.starrocks.StarrocksSessionProperties.getDynamicFilteringWaitTimeout;
+import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static java.util.Objects.requireNonNull;
 
 public class StarrocksSplitSource
@@ -30,22 +32,16 @@ public class StarrocksSplitSource
 {
     private static final ConnectorSplitBatch EMPTY_BATCH = new ConnectorSplitBatch(ImmutableList.of(), false);
 
-    private final StarrocksClient client;
-    private final StarrocksTableHandle tableHandle;
     private final CompletableFuture<?> dynamicFilter;
     private final CompletableFuture<ConnectorSplitSource> splitSourceFuture;
     private final Stopwatch dynamicFilterWaitStopwatch;
     private final long dynamicFilteringWaitTimeoutMillis;
-    private boolean isFinished;
 
-    public StarrocksSplitSource(StarrocksClient client,
-            StarrocksTableHandle tableHandle,
+    public StarrocksSplitSource(
             CompletableFuture<?> dynamicFilter,
             CompletableFuture<ConnectorSplitSource> splitSourceFuture,
             ConnectorSession session)
     {
-        this.client = client;
-        this.tableHandle = tableHandle;
         this.dynamicFilter = dynamicFilter;
         this.dynamicFilterWaitStopwatch = Stopwatch.createStarted();
         this.splitSourceFuture = requireNonNull(splitSourceFuture, "splitSourceFuture is null");
@@ -82,7 +78,7 @@ public class StarrocksSplitSource
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
-            throw new RuntimeException(e);
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, e);
         }
     }
 }

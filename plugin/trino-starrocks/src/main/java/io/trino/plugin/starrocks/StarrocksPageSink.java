@@ -16,6 +16,7 @@ package io.trino.plugin.starrocks;
 import com.google.common.collect.ImmutableList;
 import io.airlift.slice.Slice;
 import io.trino.spi.Page;
+import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.connector.ConnectorPageSink;
 import io.trino.spi.connector.ConnectorSession;
@@ -39,13 +40,14 @@ import org.json.JSONObject;
 import java.io.IOException;
 import java.net.HttpURLConnection;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static java.util.Objects.requireNonNull;
 
 public class StarrocksPageSink
@@ -54,14 +56,13 @@ public class StarrocksPageSink
     private final SchemaTableName dstTableName;
     private final List<StarrocksColumnHandle> columns;
     private final String uuid;
-    private final List<String> requestAddress;
     private final OkHttpClient client;
     private final String credential;
     private final String host;
     private final AtomicReference<RuntimeException> failureReference = new AtomicReference<>();
-    private final ConcurrentLinkedQueue<CompletableFuture<Void>> pendingRequests = new ConcurrentLinkedQueue<>();
-    private final AtomicLong compeletedBytes = new AtomicLong(0);
-    private static final MediaType mediaType = MediaType.get("application/plaintext");
+    private final AtomicLong completedBytes = new AtomicLong(0);
+
+    private static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
 
     public StarrocksPageSink(
             SchemaTableName dstTableName,
@@ -74,7 +75,6 @@ public class StarrocksPageSink
         this.dstTableName = requireNonNull(dstTableName, "dstTableName is null");
         this.columns = requireNonNull(columns, "columns is null");
         this.uuid = requireNonNull(uuid);
-        this.requestAddress = requireNonNull(config.getLoadURL(), "load address is null");
         this.credential = Credentials.basic(config.getUsername(), config.getPassword().orElse(""));
         this.client = new OkHttpClient.Builder().build();
         this.host = requireNonNull(host);
@@ -83,56 +83,28 @@ public class StarrocksPageSink
     @Override
     public long getCompletedBytes()
     {
-        return compeletedBytes.get();
+        return completedBytes.get();
     }
 
     @Override
     public CompletableFuture<?> appendPage(Page page)
     {
-        StringBuilder content = new StringBuilder();
-        for (int position = 0; position < page.getPositionCount(); position++) {
-            JSONObject jsonObject = new JSONObject();
-            for (int channel = 0; channel < page.getChannelCount(); channel++) {
-                Block block = page.getBlock(channel);
-                if (!block.isNull(position)) {
-                    StarrocksColumnHandle col = columns.get(channel);
-                    Type type = StarrocksTypeMapper.
-                            toTrinoType(col.getType(),
-                                        col.getColumnType(),
-                                        col.getColumnSize(),
-                                    col.getDecimalDigits());
-                    Object value = StarrocksValueEncoder.toJavaObject(null, type, block, position);
-                    jsonObject.put(col.getName(), value);
-                }
-            }
-            content.append(jsonObject);
-            content.append("\n");
-        }
-
-        RequestBody body = RequestBody.create(content.toString(), MediaType.get("application/json"));
-        Request req = new Request.Builder()
-                .addHeader("Authorization", this.credential)
-                .addHeader("Expect", "100-continue")
-                .addHeader("db", dstTableName.getSchemaName())
-                .addHeader("table", dstTableName.getTableName())
-                .addHeader("label", uuid)
-                .addHeader("format", "JSON")
-                .url(getURLForTransactionUpload(host).toString())
-                .put(body)
-                .build();
-        try (Response response = client.newCall(req).execute()) {
+        byte[] requestBody = starrocksStreamLoadBodyBuilder(page);
+        RequestBody body = RequestBody.create(requestBody, JSON);
+        Request request = starrocksStreamLoadRequest(body);
+        try (Response response = client.newCall(request).execute()) {
             if (!response.isSuccessful()) {
-                throw new IOException(response.message());
+                throw new TrinoException(GENERIC_INTERNAL_ERROR, response.message());
             }
             JSONObject jsonObject = new JSONObject(response.body().string());
             String status = jsonObject.getString("Status");
             if (!"OK".equals(status)) {
-                throw new IOException("Failed to upload data into starrocks");
+                throw new TrinoException(GENERIC_INTERNAL_ERROR, "Failed to upload data into starrocks");
             }
-            compeletedBytes.addAndGet(body.contentLength());
+            completedBytes.addAndGet(body.contentLength());
         }
         catch (IOException e) {
-            failureReference.set(new RuntimeException(e));
+            failureReference.set(new TrinoException(GENERIC_INTERNAL_ERROR, e));
             return CompletableFuture.failedFuture(e);
         }
         return NOT_BLOCKED;
@@ -155,7 +127,7 @@ public class StarrocksPageSink
             rollbackInsertTransaction(uuid, host);
         }
         catch (Exception e) {
-            throw new RuntimeException(e);
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, e);
         }
     }
 
@@ -177,22 +149,57 @@ public class StarrocksPageSink
                     JSONObject jsonObject = new JSONObject(respString);
                     String status = jsonObject.getString("Status");
                     if (!(status.equals("OK") && jsonObject.getString("Message").isEmpty())) {
-                        throw new Exception("Failed to rollback insert transaction" + respString);
+                        throw new TrinoException(GENERIC_INTERNAL_ERROR, "Failed to rollback insert transaction" + respString);
                     }
                 }
                 else {
-                    throw new Exception(respString);
+                    throw new TrinoException(GENERIC_INTERNAL_ERROR, respString);
                 }
             }
         }
     }
 
-    public URI getURLForTransactionRollback(String host)
+    private byte[] starrocksStreamLoadBodyBuilder(Page page)
+    {
+        StringBuilder content = new StringBuilder();
+        for (int position = 0; position < page.getPositionCount(); position++) {
+            JSONObject jsonObject = new JSONObject();
+            for (int channel = 0; channel < page.getChannelCount(); channel++) {
+                Block block = page.getBlock(channel);
+                if (!block.isNull(position)) {
+                    StarrocksColumnHandle col = columns.get(channel);
+                    Type type = StarrocksTypeMapper.toTrinoType(col);
+                    Object value = StarrocksValueEncoder.toJavaObject(null, type, block, position);
+                    jsonObject.put(col.getName(), value);
+                }
+            }
+            content.append(jsonObject);
+            content.append("\n");
+        }
+        return content.toString().getBytes(StandardCharsets.UTF_8);
+    }
+
+    private Request starrocksStreamLoadRequest(RequestBody body)
+    {
+        Request.Builder requestBuilder = new Request.Builder()
+                .addHeader("Authorization", this.credential)
+                .addHeader("Expect", "100-continue")
+                .addHeader("db", dstTableName.getSchemaName())
+                .addHeader("table", dstTableName.getTableName())
+                .addHeader("label", uuid)
+                .addHeader("format", "JSON");
+        return requestBuilder
+                .url(getURLForTransactionUpload(host).toString())
+                .put(body)
+                .build();
+    }
+
+    private URI getURLForTransactionRollback(String host)
     {
         return URI.create(String.format("http://%s/api/transaction/rollback", host));
     }
 
-    public URI getURLForTransactionUpload(String host)
+    private URI getURLForTransactionUpload(String host)
     {
         return URI.create(String.format("http://%s/api/transaction/load", host));
     }

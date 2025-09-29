@@ -13,8 +13,8 @@
  */
 package io.trino.plugin.starrocks;
 
-import io.trino.plugin.starrocks.converter.ArrowConverter;
 import io.trino.plugin.starrocks.converter.ArrowFieldConverter;
+import io.trino.spi.TrinoException;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.BigintType;
@@ -48,25 +48,27 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
 
+import static io.trino.plugin.starrocks.converter.ArrowConverter.getArrowFieldConverterFromType;
+import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
+
 public class StarrocksTypeMapper
 {
     private StarrocksTypeMapper() {}
 
     public static BlockBuilder convert(FieldVector fieldVector, Type type, int rowCount, int dataPosition, BlockBuilder blockBuilder)
     {
-        if (type instanceof DecimalType) {
-            int precision = ((DecimalType) type).getPrecision();
-            int scale = ((DecimalType) type).getScale();
-            type.createBlockBuilder(null, rowCount);
-            ArrowFieldConverter converter = new ArrowConverter.DynamicDecimalConverter(precision, scale);
-            return converter.convert(fieldVector, type, rowCount, dataPosition, blockBuilder);
-        }
-        ArrowFieldConverter converter = ArrowConverter.typeConverter.get(type.getClass());
-        if (converter == null) {
-            throw new UnsupportedOperationException("Unsupported type: " + type);
-        }
+        ArrowFieldConverter converter = getArrowFieldConverterFromType(type);
         blockBuilder = type.createBlockBuilder(null, rowCount);
         return converter.convert(fieldVector, type, rowCount, dataPosition, blockBuilder);
+    }
+
+    public static Type toTrinoType(StarrocksColumnHandle columnHandle)
+    {
+        return toTrinoType(
+                columnHandle.getType(),
+                columnHandle.getColumnType(),
+                columnHandle.getColumnSize(),
+                columnHandle.getDecimalDigits());
     }
 
     public static Type toTrinoType(String starrocksType, String starrocksColumnType, int precision, int scale)
@@ -153,7 +155,7 @@ public class StarrocksTypeMapper
             List<RowType.Field> rowElementTypes = getRowElementType(columnType);
             return RowType.from(rowElementTypes);
         }
-        throw new UnsupportedOperationException("Unsupported StarRocks type: " + columnType);
+        throw new TrinoException(GENERIC_INTERNAL_ERROR, "Unsupported StarRocks type: " + columnType);
     }
 
     static final Set<String> basicType = Set.of("boolean", "tinyint", "smallint", "int",
@@ -161,13 +163,6 @@ public class StarrocksTypeMapper
             "decimal128", "decimalv2",
             "double", "date", "datetime", "char", "varchar",
             "string", "varbinary", "largeint", "json");
-
-    static final Set<String> semiStructure = Set.of("array", "map", "struct");
-
-    public static boolean isBasicType(String starrocksType)
-    {
-        return basicType.contains(starrocksType);
-    }
 
     public static boolean isSemiStructure(String starrocksType)
     {

@@ -21,29 +21,18 @@ import io.trino.spi.connector.ConnectorPageSinkId;
 import io.trino.spi.connector.ConnectorPageSinkProvider;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTransactionHandle;
-import okhttp3.OkHttpClient;
 
 import static java.util.Objects.requireNonNull;
-import static okhttp3.Credentials.basic;
 
 public class StarrocksPageSinkProvider
         implements ConnectorPageSinkProvider
 {
     private final StarrocksConfig config;
-    private final OkHttpClient client;
 
     @Inject
     public StarrocksPageSinkProvider(StarrocksConfig config)
     {
         this.config = requireNonNull(config);
-
-        OkHttpClient.Builder clientBuilder = new OkHttpClient.Builder();
-
-        clientBuilder.setAuthenticator$okhttp(
-                (_, response) -> response.request().newBuilder()
-                        .header("Authorization", basic(config.getUsername(), config.getPassword().orElse("")))
-                        .build());
-        this.client = clientBuilder.build();
     }
 
     @Override

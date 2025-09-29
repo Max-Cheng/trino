@@ -139,7 +139,14 @@ public class StarrocksColumnHandle
     @Override
     public String toString()
     {
-        return this.name + ":" + this.ordinalPosition + ":" + this.type + ":" + this.columnType
-                + ":" + this.nullable + ":" + this.extra + ":" + this.comment + ":" + this.columnSize + ":" + this.decimalDigits;
+        return this.name + ":" +
+               this.ordinalPosition + ":" +
+               this.type + ":" +
+               this.columnType + ":" +
+               this.nullable + ":" +
+               this.extra + ":" +
+               this.comment + ":" +
+               this.columnSize + ":" +
+               this.decimalDigits;
     }
 }

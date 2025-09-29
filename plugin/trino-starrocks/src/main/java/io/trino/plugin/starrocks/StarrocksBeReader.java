@@ -13,11 +13,9 @@
  */
 package io.trino.plugin.starrocks;
 
-import com.starrocks.shade.org.apache.thrift.TException;
 import com.starrocks.shade.org.apache.thrift.protocol.TBinaryProtocol;
 import com.starrocks.shade.org.apache.thrift.protocol.TProtocol;
 import com.starrocks.shade.org.apache.thrift.transport.TSocket;
-import com.starrocks.shade.org.apache.thrift.transport.TTransportException;
 import com.starrocks.thrift.TScanBatchResult;
 import com.starrocks.thrift.TScanCloseParams;
 import com.starrocks.thrift.TScanNextBatchParams;
@@ -25,10 +23,13 @@ import com.starrocks.thrift.TScanOpenParams;
 import com.starrocks.thrift.TScanOpenResult;
 import com.starrocks.thrift.TStarrocksExternalService;
 import com.starrocks.thrift.TStatusCode;
+import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.SchemaTableName;
 
 import java.util.List;
+
+import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 
 public class StarrocksBeReader
         implements AutoCloseable
@@ -55,9 +56,9 @@ public class StarrocksBeReader
         try {
             socket.open();
         }
-        catch (TTransportException e) {
+        catch (Exception e) {
             socket.close();
-            throw new RuntimeException("Failed to open socket to " + ip + ":" + port, e);
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Failed to open socket to " + ip + ":" + port + e.getMessage());
         }
         TProtocol protocol = factory.getProtocol(socket);
         this.host = ip;
@@ -75,6 +76,26 @@ public class StarrocksBeReader
             List<Long> tablets,
             String opaquedQueryPlan)
     {
+        TScanOpenParams params = getTScanOpenParams(tablets, opaquedQueryPlan);
+        TScanOpenResult result = null;
+        try {
+            result = client.open_scanner(params);
+            if (!result.getStatus().getStatus_code().equals(TStatusCode.OK)) {
+                this.close();
+                throw new TrinoException(GENERIC_INTERNAL_ERROR,
+                        "Failed to open scanner "
+                                + result.getStatus().getStatus_code()
+                                + result.getStatus().getError_msgs());
+            }
+        }
+        catch (Exception e) {
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Failed to open scanner " + e.getMessage());
+        }
+        this.contextId = result.getContext_id();
+    }
+
+    private TScanOpenParams getTScanOpenParams(List<Long> tablets, String opaquedQueryPlan)
+    {
         TScanOpenParams params = new TScanOpenParams();
 
         params.setTablet_ids(tablets);
@@ -90,20 +111,7 @@ public class StarrocksBeReader
         params.setKeep_alive_min(keepAliveMin);
         params.setQuery_timeout(600);
         params.setMem_limit(1024 * 1024 * 1024L);
-        TScanOpenResult result = null;
-        try {
-            result = client.open_scanner(params);
-            if (!result.getStatus().getStatus_code().equals(TStatusCode.OK)) {
-                throw new RuntimeException(
-                        "Failed to open scanner."
-                                + result.getStatus().getStatus_code()
-                                + result.getStatus().getError_msgs());
-            }
-        }
-        catch (TException e) {
-            throw new RuntimeException("Failed to open scanner." + e.getMessage());
-        }
-        this.contextId = result.getContext_id();
+        return params;
     }
 
     public TScanBatchResult getNextBatch()
@@ -115,13 +123,13 @@ public class StarrocksBeReader
         try {
             result = client.get_next(params);
             if (!TStatusCode.OK.equals(result.getStatus().getStatus_code())) {
-                throw new RuntimeException(
+                throw new TrinoException(GENERIC_INTERNAL_ERROR,
                         "Failed to get next from be -> ip:[" + host + "] "
                                 + result.getStatus().getStatus_code() + " msg:" + result.getStatus().getError_msgs());
             }
         }
-        catch (TException e) {
-            throw new RuntimeException(e.getMessage());
+        catch (Exception e) {
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, e.getMessage());
         }
         return result;
     }
@@ -139,13 +147,16 @@ public class StarrocksBeReader
     @Override
     public void close()
     {
+        if (contextId == null) {
+            return;
+        }
         TScanCloseParams tScanCloseParams = new TScanCloseParams();
         tScanCloseParams.setContext_id(this.contextId);
         try {
             this.client.close_scanner(tScanCloseParams);
         }
-        catch (TException e) {
-            throw new RuntimeException(e.getMessage());
+        catch (Exception e) {
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, e.getMessage());
         }
     }
 }

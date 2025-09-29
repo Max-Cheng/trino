@@ -16,6 +16,7 @@ package io.trino.plugin.starrocks;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.slice.Slice;
+import io.trino.spi.TrinoException;
 import io.trino.spi.connector.Assignment;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
@@ -47,6 +48,7 @@ import java.util.Set;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
+import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 
 public class StarrocksMetadata
         implements ConnectorMetadata
@@ -69,19 +71,19 @@ public class StarrocksMetadata
     @Override
     public List<String> listSchemaNames(ConnectorSession session)
     {
-        return client.getClient().getSchemaNames(session);
+        return client.getSchemaNames(session);
     }
 
     @Override
     public List<SchemaTableName> listTables(ConnectorSession session, Optional<String> schemaName)
     {
-        return client.getClient().listTables(schemaName, session);
+        return client.listTables(schemaName, session);
     }
 
     @Override
     public ConnectorTableHandle getTableHandle(ConnectorSession session, SchemaTableName tableName, Optional<ConnectorTableVersion> startVersion, Optional<ConnectorTableVersion> endVersion)
     {
-        return client.getClient().getTableHandle(session, tableName);
+        return client.getTableHandle(session, tableName);
     }
 
     @Override
@@ -94,11 +96,7 @@ public class StarrocksMetadata
                         .map(column -> {
                             ColumnMetadata.Builder builder = ColumnMetadata.builder();
                             builder.setName(column.getName());
-                            builder.setType(StarrocksTypeMapper.toTrinoType(
-                                    column.getType(),
-                                    column.getColumnType(),
-                                    column.getColumnSize(),
-                                    column.getDecimalDigits()));
+                            builder.setType(StarrocksTypeMapper.toTrinoType(column));
                             builder.setNullable(column.isNullable());
                             builder.setComment(Optional.of(column.getComment()));
                             builder.setExtraInfo(Optional.of(column.getExtra()));
@@ -125,8 +123,8 @@ public class StarrocksMetadata
                 .findFirst()
                 .map(column -> new ColumnMetadata(
                         column.getName(),
-                        StarrocksTypeMapper.toTrinoType(column.getType(), column.getColumnType(), column.getColumnSize(), column.getDecimalDigits())))
-                .orElseThrow(() -> new IllegalArgumentException("Column not found: " + columnHandle));
+                        StarrocksTypeMapper.toTrinoType(column)))
+                .orElseThrow(() -> new TrinoException(GENERIC_INTERNAL_ERROR, "Column not found: " + columnHandle));
     }
 
     @Override
@@ -165,7 +163,7 @@ public class StarrocksMetadata
                         new Assignment(
                                 entry.getKey(),
                                 entry.getValue(),
-                                StarrocksTypeMapper.toTrinoType(entry.getValue().getType(), entry.getValue().getColumnType(), entry.getValue().getColumnSize(), entry.getValue().getDecimalDigits())))
+                                StarrocksTypeMapper.toTrinoType(entry.getValue())))
                 .collect(toImmutableList());
 
         boolean allExpressionsHandled = projections.stream()
@@ -196,7 +194,7 @@ public class StarrocksMetadata
         if (expression instanceof Variable) {
             return ((Variable) expression).getName();
         }
-        throw new IllegalArgumentException("Expression is not a Variable");
+        throw new TrinoException(GENERIC_INTERNAL_ERROR, "Expression is not a Variable");
     }
 
     @Override
@@ -231,7 +229,7 @@ public class StarrocksMetadata
     @Override
     public TableStatistics getTableStatistics(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
-        return this.client.getClient().getTableStatistics(session, tableHandle);
+        return this.client.getTableStatistics(session, tableHandle);
     }
 
     @Override
@@ -242,13 +240,13 @@ public class StarrocksMetadata
         Random rand = new Random();
         String host = config.getLoadURL().get(rand.nextInt(config.getLoadURL().size()));
         try {
-            uuid = this.client.getClient().createInsertTransaction(
+            uuid = this.client.createInsertTransaction(
                     session,
                     starrocksTableHandle,
                     host);
         }
         catch (Exception e) {
-            throw new RuntimeException(e);
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, e);
         }
         return new StarrocksInsertTableHandle(
                 starrocksTableHandle.getSchemaTableName(),
@@ -267,14 +265,14 @@ public class StarrocksMetadata
     {
         StarrocksInsertTableHandle starrocksInsertTableHandle = (StarrocksInsertTableHandle) insertHandle;
         try {
-            this.client.getClient().commitInsertTransaction(
+            this.client.commitInsertTransaction(
                     session,
                     starrocksInsertTableHandle,
                     starrocksInsertTableHandle.getUuid(),
                     starrocksInsertTableHandle.getHost());
         }
         catch (Exception e) {
-            throw new RuntimeException(e);
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, e);
         }
         return Optional.empty();
     }

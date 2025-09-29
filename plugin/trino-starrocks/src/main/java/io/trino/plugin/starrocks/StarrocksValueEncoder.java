@@ -40,9 +40,7 @@ final class StarrocksValueEncoder
     private static final ObjectMapper mapper = new ObjectMapper();
 
     private StarrocksValueEncoder()
-    {
-        throw new AssertionError("Utility class should not be instantiated");
-    }
+    {}
 
     static Object toJavaObject(ConnectorSession session, Type type, Block block, int position)
     {
@@ -91,14 +89,14 @@ final class StarrocksValueEncoder
                     return Int128.valueOf(sqlDecimal.getUnscaledValue()).toLongExact();
                 }
                 else {
-                    return sqlDecimal.toBigDecimal().doubleValue();
+                    return sqlDecimal.toString();
                 }
             }
         }
         if (type instanceof DateType dateType) {
             return dateType.getObjectValue(block, position).toString();
         }
-        return type.getObjectValue(block, position);
+        return type.getObjectValue(block, position).toString();
     }
 
     static Map<String, Object> toMap(ConnectorSession session, RowType rowType, SqlRow sqlRow)

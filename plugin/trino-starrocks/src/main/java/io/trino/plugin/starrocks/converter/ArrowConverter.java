@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.starrocks.converter;
 
+import io.trino.spi.TrinoException;
 import io.trino.spi.block.ArrayBlockBuilder;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.MapBlockBuilder;
@@ -60,63 +61,37 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
+
+import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 
 public class ArrowConverter
 {
-    public static Map<Class<? extends Type>, ArrowFieldConverter> typeConverter = new HashMap<>();
-
-    public static Map<String, Type> typeMap = new HashMap<>();
-
     private ArrowConverter()
     {
     }
 
-    static {
-        typeConverter.put(TinyintType.class, new TinyintConverter());
-        typeConverter.put(SmallintType.class, new SmallintConverter());
-        typeConverter.put(IntegerType.class, new IntegerConverter());
-        typeConverter.put(BigintType.class, new BigintConverter());
-        typeConverter.put(RealType.class, new RealConverter());
-        typeConverter.put(DoubleType.class, new DoubleConverter());
-        // Large int
-        typeConverter.put(DecimalType.createDecimalType(38, 0).getClass(), new DynamicDecimalConverter(38, 0));
-        // Boolean
-        typeConverter.put(BooleanType.class, new BooleanConverter());
-        // String
-        typeConverter.put(VarcharType.class, new VarcharConverter());
-        // TODO:Not Support yet
-        // typeConverter.put(VarbinaryType.class, new VarbinaryConverter());
-        // Date
-        typeConverter.put(DateType.class, new DateConverter());
-        typeConverter.put(TimestampType.TIMESTAMP_MILLIS.getClass(), new TimestampConverter());
-        // Semi-structured
-        typeConverter.put(ArrayType.class, new ArrayConverter());
-        typeConverter.put(MapType.class, new MapConverter());
-        typeConverter.put(RowType.class, new StructConverter());
-        typeConverter.put(JsonType.JSON.getClass(), new VarcharConverter());
-    }
-
-    static {
-        typeMap.put("boolean", BooleanType.BOOLEAN);
-        typeMap.put("tinyint", TinyintType.TINYINT);
-        typeMap.put("smallint", SmallintType.SMALLINT);
-        typeMap.put("int", IntegerType.INTEGER);
-        typeMap.put("integer", IntegerType.INTEGER);
-        typeMap.put("bigint", BigintType.BIGINT);
-        typeMap.put("bigint unsigned", DecimalType.createDecimalType(38, 0));
-        typeMap.put("float", RealType.REAL);
-        typeMap.put("double", DoubleType.DOUBLE);
-        typeMap.put("date", DateType.DATE);
-        typeMap.put("datetime", TimestampType.TIMESTAMP_MILLIS);
-        typeMap.put("char", VarcharType.VARCHAR);
-        typeMap.put("varchar", VarcharType.VARCHAR);
-        typeMap.put("string", VarcharType.VARCHAR);
-        typeMap.put("varbinary", VarbinaryType.VARBINARY);
-        typeMap.put("largeint", DecimalType.createDecimalType());
+    public static ArrowFieldConverter getArrowFieldConverterFromType(Type type)
+    {
+        return switch (type) {
+            case TinyintType t -> new TinyintConverter();
+            case SmallintType t -> new SmallintConverter();
+            case IntegerType t -> new IntegerConverter();
+            case BigintType t -> new BigintConverter();
+            case RealType t -> new RealConverter();
+            case DoubleType t -> new DoubleConverter();
+            case BooleanType t -> new BooleanConverter();
+            case VarcharType t -> new VarcharConverter();
+            case DateType t -> new DateConverter();
+            case ArrayType t -> new ArrayConverter();
+            case MapType t -> new MapConverter();
+            case RowType t -> new StructConverter();
+            case DecimalType t -> new DynamicDecimalConverter(t.getPrecision(), t.getScale());
+            case TimestampType t -> new TimestampConverter();
+            case JsonType t -> new JsonConverter();
+            default -> throw new UnsupportedOperationException("Unsupported type: " + type.getClass());
+        };
     }
 
     private static class TinyintConverter
@@ -126,7 +101,7 @@ public class ArrowConverter
         public BlockBuilder convert(FieldVector vector, Type type, int rowCount, int dataPosition, BlockBuilder blockBuilder)
         {
             if (vector instanceof BitVector) {
-                return ((BooleanConverter) typeConverter.get(BooleanType.class)).convert(vector, type, rowCount, dataPosition, blockBuilder);
+                return getArrowFieldConverterFromType(BooleanType.BOOLEAN).convert(vector, type, rowCount, dataPosition, blockBuilder);
             }
             if (blockBuilder == null) {
                 blockBuilder = type.createBlockBuilder(null, rowCount);
@@ -198,14 +173,13 @@ public class ArrowConverter
                 blockBuilder = type.createBlockBuilder(null, rowCount);
             }
             for (int i = 0; i < rowCount; i++) {
-                if (vector instanceof VarCharVector) {
-                    VarCharVector valueVectors = (VarCharVector) vector;
+                if (vector instanceof VarCharVector valueVectors) {
                     Text value = valueVectors.getObject(i);
                     if (value == null) {
                         blockBuilder.appendNull();
                     }
                     else {
-                        Integer intValue = Integer.parseInt(value.toString());
+                        int intValue = Integer.parseInt(value.toString());
                         IntegerType.INTEGER.writeLong(blockBuilder, intValue);
                     }
                 }
@@ -324,12 +298,10 @@ public class ArrowConverter
                     else {
                         int precision = decimalType.getPrecision();
                         if (precision <= 18) {
-                            // 对于精度小于等于18的情况，使用long表示
                             long unscaledValue = value.unscaledValue().longValue();
                             decimalType.writeLong(blockBuilder, unscaledValue);
                         }
                         else {
-                            // 对于精度大于18的情况，使用Int128表示
                             Int128 int128Value = Int128.valueOf(value.unscaledValue());
                             decimalType.writeObject(blockBuilder, int128Value);
                         }
@@ -432,7 +404,6 @@ public class ArrowConverter
                 }
                 else if (vector instanceof TimeStampMicroVector) {
                     LocalDateTime value = ((TimeStampMicroVector) vector).getObject(i);
-                    // epoch seconds to date
                     if (value == null) {
                         blockBuilder.appendNull();
                     }
@@ -441,7 +412,7 @@ public class ArrowConverter
                     }
                 }
                 else {
-                    throw new UnsupportedOperationException("Unsupported type: " + vector.getClass());
+                    throw new TrinoException(GENERIC_INTERNAL_ERROR, "Unsupported type: " + vector.getClass());
                 }
             }
             return blockBuilder;
@@ -459,7 +430,7 @@ public class ArrowConverter
             ArrayBlockBuilder arrayBlockBuilder = (ArrayBlockBuilder) blockBuilder;
             ListVector listVector = (ListVector) vector;
             ValueVector subVector = listVector.getDataVector();
-            String elementType = ((ArrayType) type).getElementType().toString();
+            Type elementType = ((ArrayType) type).getElementType();
 
             for (int i = 0; i < rowCount; i++) {
                 if (listVector.isNull(i)) {
@@ -471,26 +442,14 @@ public class ArrowConverter
                 int elementCount = end - start;
                 TransferPair transferPair = subVector.getTransferPair(vector.getAllocator());
                 transferPair.splitAndTransfer(start, elementCount);
-                if (elementType.startsWith("decimal")) {
-                    DecimalType innerType = (DecimalType) ((ArrayType) type).getElementType();
-                    ArrowFieldConverter converter = new DynamicDecimalConverter(innerType.getPrecision(), innerType.getScale());
-                    BlockBuilder tempBlock = DecimalType.createDecimalType(innerType.getPrecision(), innerType.getScale()).createBlockBuilder(null, elementCount);
-                    converter.convert((FieldVector) transferPair.getTo(), DecimalType.createDecimalType(innerType.getPrecision(), innerType.getScale()), elementCount, dataPosition, tempBlock);
-                    arrayBlockBuilder.buildEntry(elementBuilder -> {
-                        ValueBlock elementBlock = tempBlock.buildValueBlock();
-                        elementBuilder.appendRange(elementBlock, 0, elementBlock.getPositionCount());
-                    });
-                }
-                else {
-                    ArrowFieldConverter converter = typeConverter.get(((ArrayType) type).getElementType().getClass());
-                    // temp block is array type inner block
-                    BlockBuilder tempBlock = ((ArrayType) type).getElementType().createBlockBuilder(null, elementCount);
-                    converter.convert((FieldVector) transferPair.getTo(), ((ArrayType) type).getElementType(), elementCount, dataPosition, tempBlock);
-                    arrayBlockBuilder.buildEntry(elementBuilder -> {
-                        ValueBlock elementBlock = tempBlock.buildValueBlock();
-                        elementBuilder.appendRange(elementBlock, 0, elementBlock.getPositionCount());
-                    });
-                }
+                ArrowFieldConverter converter = getArrowFieldConverterFromType(elementType);
+                // temp block is array type inner block
+                BlockBuilder tempBlock = elementType.createBlockBuilder(null, elementCount);
+                converter.convert((FieldVector) transferPair.getTo(), ((ArrayType) type).getElementType(), elementCount, dataPosition, tempBlock);
+                arrayBlockBuilder.buildEntry(elementBuilder -> {
+                    ValueBlock elementBlock = tempBlock.buildValueBlock();
+                    elementBuilder.appendRange(elementBlock, 0, elementBlock.getPositionCount());
+                });
                 transferPair.getTo().close();
             }
             arrayBlockBuilder.build();
@@ -519,7 +478,7 @@ public class ArrowConverter
                     for (int j = 0; j < fieldVectors.size(); j++) {
                         FieldVector fieldVector = fieldVectors.get(j);
                         Type fieldType = ((RowType) type).getFields().get(j).getType();
-                        ArrowFieldConverter converter = typeConverter.get(fieldType.getClass());
+                        ArrowFieldConverter converter = getArrowFieldConverterFromType(fieldType);
                         BlockBuilder fieldBlockBuilder = fieldType.createBlockBuilder(null, 1);
                         converter.convert(fieldVector, fieldType, 1, dataPosition, fieldBlockBuilder);
                         ValueBlock fieldBlock = fieldBlockBuilder.buildValueBlock();
@@ -557,8 +516,8 @@ public class ArrowConverter
                 transferPair.splitAndTransfer(start, elementCount);
                 StructVector structVector = (StructVector) transferPair.getTo();
                 // Get the key and value vectors
-                ValueVector keysVector = structVector.getChild("key");
-                ValueVector valuesVector = structVector.getChild("value");
+                FieldVector keysVector = structVector.getChild("key");
+                FieldVector valuesVector = structVector.getChild("value");
                 // Get the key and value types
                 String keyType = keysVector.getMinorType().name().toLowerCase(Locale.ROOT);
                 String valueType = valuesVector.getMinorType().name().toLowerCase(Locale.ROOT);
@@ -567,25 +526,12 @@ public class ArrowConverter
                 BlockBuilder valuesBlockBuilder = rowType.getValueType().createBlockBuilder(null, elementCount);
                 // Convert the key and value vectors
                 mapBlockBuilder.buildEntry((keyBlockBuilder, valueBlockBuilder) -> {
-                    ArrowFieldConverter keyConverter;
-                    if (rowType.getKeyType().toString().startsWith("decimal")) {
-                        DecimalType innerType = (DecimalType) rowType.getKeyType();
-                        keyConverter = new DynamicDecimalConverter(innerType.getPrecision(), innerType.getScale());
-                    }
-                    else {
-                        keyConverter = typeConverter.get(rowType.getKeyType().getClass());
-                    }
-                    keyConverter.convert((FieldVector) keysVector, rowType.getKeyType(), elementCount, dataPosition, keysBlockBuilder);
-                    ArrowFieldConverter valueConverter;
-
-                    if (rowType.getValueType().toString().startsWith("decimal")) {
-                        DecimalType innerType = (DecimalType) rowType.getValueType();
-                        valueConverter = new DynamicDecimalConverter(innerType.getPrecision(), innerType.getScale());
-                    }
-                    else {
-                        valueConverter = typeConverter.get(rowType.getValueType().getClass());
-                    }
-                    valueConverter.convert((FieldVector) valuesVector, rowType.getValueType(), elementCount, dataPosition, valuesBlockBuilder);
+                    // Key Convert
+                    ArrowFieldConverter keyConverter = getArrowFieldConverterFromType(rowType.getKeyType());
+                    keyConverter.convert(keysVector, rowType.getKeyType(), elementCount, dataPosition, keysBlockBuilder);
+                    ArrowFieldConverter valueConverter = getArrowFieldConverterFromType(rowType.getValueType());
+                    // Value Convert
+                    valueConverter.convert(valuesVector, rowType.getValueType(), elementCount, dataPosition, valuesBlockBuilder);
                     ValueBlock keyBlock = keysBlockBuilder.buildValueBlock();
                     ValueBlock valueBlock = valuesBlockBuilder.buildValueBlock();
 
@@ -606,7 +552,19 @@ public class ArrowConverter
         @Override
         public BlockBuilder convert(FieldVector vector, Type type, int rowCount, int dataPosition, BlockBuilder blockBuilder)
         {
-            return null;
+            if (blockBuilder == null) {
+                blockBuilder = type.createBlockBuilder(null, rowCount);
+            }
+            for (int i = 0; i < rowCount; i++) {
+                Text value = ((VarCharVector) vector).getObject(i);
+                if (value == null) {
+                    blockBuilder.appendNull();
+                }
+                else {
+                    JsonType.JSON.writeString(blockBuilder, value.toString());
+                }
+            }
+            return blockBuilder;
         }
     }
 }

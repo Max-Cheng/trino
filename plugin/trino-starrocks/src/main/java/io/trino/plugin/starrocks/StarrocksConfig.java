@@ -16,6 +16,7 @@ package io.trino.plugin.starrocks;
 import com.google.common.collect.ImmutableList;
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
+import io.airlift.configuration.ConfigSecuritySensitive;
 import io.airlift.units.Duration;
 import io.airlift.units.MinDuration;
 import jakarta.validation.constraints.NotNull;
@@ -33,11 +34,12 @@ public class StarrocksConfig
     private String jdbcURL;
     private List<String> loadURL = ImmutableList.of();
     private String username;
-    private Optional<String> password;
+    private String password;
     private final int scanMaxRetry = 3;
     private Duration dynamicFilteringWaitTimeout = Duration.valueOf("10s");
-    private int tupleDomainLimit = 1000;
+    private int tupleDomainLimit = 10000;
     private boolean enableLDAP;
+    private boolean enableMaterializedView;
 
     private String defaultStreamLoadCompression = "none";
 
@@ -47,20 +49,11 @@ public class StarrocksConfig
         return scanURL.get(new Random().nextInt(this.scanURL.size()));
     }
 
-    @Config("scan-url")
+    @Config("starrocks.scan-url")
     @ConfigDescription("Scan URL for the Starrocks BE")
     public StarrocksConfig setScanURL(String scanURL)
     {
         this.scanURL = Arrays.stream(scanURL.split(","))
-                .collect(toImmutableList());
-        return this;
-    }
-
-    @Config("load-url")
-    @ConfigDescription("The address that is used to connect to the HTTP server of the FE. You can specify multiple addresses, which must be separated by a semicolon (,)")
-    public StarrocksConfig setLoadURL(String loadURL)
-    {
-        this.loadURL = Arrays.stream(loadURL.split(","))
                 .collect(toImmutableList());
         return this;
     }
@@ -71,12 +64,21 @@ public class StarrocksConfig
         return this.loadURL;
     }
 
+    @Config("starrocks.load-url")
+    @ConfigDescription("The address that is used to connect to the HTTP server of the FE. You can specify multiple addresses, which must be separated by a semicolon (,)")
+    public StarrocksConfig setLoadURL(String loadURL)
+    {
+        this.loadURL = Arrays.stream(loadURL.split(","))
+                .collect(toImmutableList());
+        return this;
+    }
+
     public String getJdbcURL()
     {
         return jdbcURL;
     }
 
-    @Config("jdbc-url")
+    @Config("starrocks.jdbc-url")
     @ConfigDescription("JDBC URL for the Starrocks FE")
     public StarrocksConfig setJdbcURL(String jdbcURL)
     {
@@ -89,7 +91,7 @@ public class StarrocksConfig
         return username;
     }
 
-    @Config("username")
+    @Config("starrocks.username")
     @ConfigDescription("Username for the Starrocks user")
     public StarrocksConfig setUsername(String username)
     {
@@ -97,45 +99,47 @@ public class StarrocksConfig
         return this;
     }
 
-    @Config("dynamic-filtering-wait-timeout")
+    @MinDuration("0ms")
+    @NotNull
+    public Duration getDynamicFilteringWaitTimeout()
+    {
+        return dynamicFilteringWaitTimeout;
+    }
+
+    @Config("starrocks.dynamic-filtering-wait-timeout")
     @ConfigDescription("Duration to wait for completion of dynamic filters")
-    public Duration setDynamicFilteringWaitTimeout(String dynamicFilteringWaitTimeout)
+    public StarrocksConfig setDynamicFilteringWaitTimeout(String dynamicFilteringWaitTimeout)
     {
         this.dynamicFilteringWaitTimeout = Duration.valueOf(dynamicFilteringWaitTimeout);
-        return this.dynamicFilteringWaitTimeout;
+        return this;
     }
 
-    @Config("tuple-domain-limit")
+    @Config("starrocks.tuple-domain-limit")
     @ConfigDescription("Maximum number of tuple domains to include in a single dynamic filter")
-    public int setTupleDomainLimit(int tupleDomainLimit)
+    public StarrocksConfig setTupleDomainLimit(int tupleDomainLimit)
     {
         this.tupleDomainLimit = tupleDomainLimit;
-        return this.tupleDomainLimit;
+        return this;
     }
 
+    @NotNull
     public Optional<String> getPassword()
     {
-        return password;
+        return Optional.ofNullable(password);
     }
 
-    @Config("password")
+    @Config("starrocks.password")
     @ConfigDescription("Password for the Starrocks user")
+    @ConfigSecuritySensitive
     public StarrocksConfig setPassword(String password)
     {
-        this.password = Optional.of(password);
+        this.password = password;
         return this;
     }
 
     public int getScanMaxRetries()
     {
         return scanMaxRetry;
-    }
-
-    @MinDuration("0ms")
-    @NotNull
-    public Duration getDynamicFilteringWaitTimeout()
-    {
-        return dynamicFilteringWaitTimeout;
     }
 
     public int getTupleDomainLimit()
@@ -148,7 +152,7 @@ public class StarrocksConfig
         return enableLDAP;
     }
 
-    @Config("enable-ldap")
+    @Config("starrocks.enable-ldap")
     public StarrocksConfig setEnableLDAP(boolean enableLDAP)
     {
         this.enableLDAP = enableLDAP;
@@ -162,9 +166,22 @@ public class StarrocksConfig
 
     @Config("default-stream-load-compression")
     @ConfigDescription("Defualt Stream Load compression, e.g. none, gzip, bzip2, lz4_frame, zstd.")
-    public String setDefaultStreamLoadCompression(String defaultStreamLoadCompression)
+    public StarrocksConfig setDefaultStreamLoadCompression(String defaultStreamLoadCompression)
     {
         this.defaultStreamLoadCompression = defaultStreamLoadCompression;
-        return this.defaultStreamLoadCompression;
+        return this;
+    }
+
+    public boolean getDefaultMaterializedViewEnabled()
+    {
+        return enableMaterializedView;
+    }
+
+    @Config("starrocks.enable-materialized-view")
+    @ConfigDescription("Some materialized view can be query")
+    public StarrocksConfig setDefaultMaterializedViewEnabled(boolean enableMaterializedView)
+    {
+        this.enableMaterializedView = enableMaterializedView;
+        return this;
     }
 }

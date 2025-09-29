@@ -15,6 +15,7 @@ package io.trino.plugin.starrocks;
 
 import com.starrocks.thrift.TScanBatchResult;
 import io.trino.spi.Page;
+import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.connector.ColumnHandle;
@@ -32,6 +33,7 @@ import java.util.Arrays;
 import java.util.List;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static java.util.Objects.requireNonNull;
 
 public class StarrocksPageSource
@@ -45,7 +47,7 @@ public class StarrocksPageSource
     private long readTimeNanos;
     private long completedBytes;
     private ArrowStreamReader currentArrowReader;
-    private RootAllocator rootAllocator;
+    private final RootAllocator rootAllocator;
 
     public StarrocksPageSource(StarrocksBeReader beReader, List<ColumnHandle> columns)
     {
@@ -54,7 +56,7 @@ public class StarrocksPageSource
                 .map(StarrocksColumnHandle.class::cast)
                 .collect(toImmutableList());
         this.types = columnHandles.stream()
-                .map(col -> StarrocksTypeMapper.toTrinoType(col.getType(), col.getColumnType(), col.getColumnSize(), col.getDecimalDigits()))
+                .map(StarrocksTypeMapper::toTrinoType)
                 .collect(toImmutableList());
         this.rootAllocator = new RootAllocator(2147483647L);
     }
@@ -121,10 +123,11 @@ public class StarrocksPageSource
             beReader.setReaderOffset(beReader.getReaderOffset() + root.getRowCount());
             Block[] blocks = Arrays.stream(blockBuilders).map(BlockBuilder::build).toArray(Block[]::new);
             fieldVectors.forEach(FieldVector::clear);
-            return SourcePage.create(blocks);
+            Page page = new Page(root.getRowCount(), blocks);
+            return SourcePage.create(page);
         }
         catch (IOException e) {
-            throw new RuntimeException("Failed to read next Arrow batch", e);
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Failed to read next Arrow batch", e);
         }
     }
 
@@ -159,7 +162,7 @@ public class StarrocksPageSource
             }
         }
         catch (IOException e) {
-            throw new RuntimeException("Failed to close StarrocksPageSource", e);
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Failed to close StarrocksPageSource", e);
         }
     }
 

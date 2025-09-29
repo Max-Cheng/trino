@@ -24,7 +24,6 @@ import static io.trino.spi.type.VarcharType.VARCHAR;
 
 public class StarrocksTableProperties
 {
-    // TODO:add more properties
     public static final String PROPERTIES_PARTITIONED_BY = "partitioned_by";
 
     private final List<PropertyMetadata<?>> tableProperties;

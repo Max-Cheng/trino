@@ -69,7 +69,7 @@ public class StarrocksSplitManager
                 .completeOnTimeout(null, timeoutMillis, MILLISECONDS);
         CompletableFuture<ConnectorSplitSource> splitSourceFuture = dynamicFilterFuture.thenApply(
                 ignored -> getSplitSource(table, starrocksTableHandle.getConstraint().intersect(dynamicFilter.getCurrentPredicate()), tupleDomainLimit));
-        return new StarrocksSplitSource(client, starrocksTableHandle, dynamicFilterFuture, splitSourceFuture, session);
+        return new StarrocksSplitSource(dynamicFilterFuture, splitSourceFuture, session);
     }
 
     private ConnectorSplitSource getSplitSource(
@@ -79,6 +79,6 @@ public class StarrocksSplitManager
     {
         StarrocksTableHandle handle = (StarrocksTableHandle) table;
 
-        return new FixedSplitSource(client.getClient().buildStarrocksSplits(handle, dynamicFilter, tupleDomainLimit));
+        return new FixedSplitSource(client.buildStarrocksSplits(handle, dynamicFilter, tupleDomainLimit));
     }
 }
