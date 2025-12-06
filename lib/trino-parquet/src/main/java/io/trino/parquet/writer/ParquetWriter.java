@@ -41,10 +41,12 @@ import org.apache.parquet.format.BloomFilterAlgorithm;
 import org.apache.parquet.format.BloomFilterCompression;
 import org.apache.parquet.format.BloomFilterHash;
 import org.apache.parquet.format.BloomFilterHeader;
+import org.apache.parquet.format.ColumnIndex;
 import org.apache.parquet.format.ColumnMetaData;
 import org.apache.parquet.format.CompressionCodec;
 import org.apache.parquet.format.FileMetaData;
 import org.apache.parquet.format.KeyValue;
+import org.apache.parquet.format.OffsetIndex;
 import org.apache.parquet.format.RowGroup;
 import org.apache.parquet.format.SplitBlockAlgorithm;
 import org.apache.parquet.format.Uncompressed;
@@ -58,6 +60,7 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.UncheckedIOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -107,6 +110,9 @@ public class ParquetWriter
     private final Optional<DateTimeZone> parquetTimeZone;
     private final FileFooter fileFooter;
     private final ImmutableList.Builder<List<Optional<BloomFilter>>> bloomFilterGroups = ImmutableList.builder();
+    private final ImmutableList.Builder<List<Optional<ColumnIndex>>> columnIndexGroups = ImmutableList.builder();
+    private final ImmutableList.Builder<List<Optional<OffsetIndex>>> offsetIndexGroups = ImmutableList.builder();
+    private final ImmutableList.Builder<RowGroupMetadata> rowGroupMetadataList = ImmutableList.builder();
     private final Optional<ParquetWriteValidationBuilder> validationBuilder;
 
     private List<ColumnWriter> columnWriters;
@@ -224,8 +230,55 @@ public class ParquetWriter
             columnWriters.forEach(ColumnWriter::close);
             flush();
             columnWriters = ImmutableList.of();
+
+            // Build all lists
+            List<RowGroupMetadata> rowGroupMetadata = rowGroupMetadataList.build();
+            List<List<Optional<BloomFilter>>> bloomFilters = bloomFilterGroups.build();
+            List<List<Optional<ColumnIndex>>> columnIndexes = columnIndexGroups.build();
+            List<List<Optional<OffsetIndex>>> offsetIndexes = offsetIndexGroups.build();
+
+            // Write indexes to file and collect their offsets
+            writeBloomFilters(rowGroupMetadata, bloomFilters);
+            List<List<IndexOffsets>> columnIndexOffsetsList = writeColumnIndexes(columnIndexes);
+            List<List<IndexOffsets>> offsetIndexOffsetsList = writeOffsetIndexes(offsetIndexes);
+
+            // Now create RowGroups with ColumnChunks that have index references
+            for (int group = 0; group < rowGroupMetadata.size(); group++) {
+                RowGroupMetadata metadata = rowGroupMetadata.get(group);
+                List<org.apache.parquet.format.ColumnChunk> columnChunks = new ArrayList<>();
+
+                for (int col = 0; col < metadata.columnMetaData.size(); col++) {
+                    ColumnMetaData colMetaData = metadata.columnMetaData.get(col);
+                    org.apache.parquet.format.ColumnChunk columnChunk = new org.apache.parquet.format.ColumnChunk(0);
+                    columnChunk.setMeta_data(colMetaData);
+
+                    // Set column index offsets if available
+                    if (group < columnIndexOffsetsList.size() && col < columnIndexOffsetsList.get(group).size()) {
+                        IndexOffsets indexOffsets = columnIndexOffsetsList.get(group).get(col);
+                        if (indexOffsets != null) {
+                            columnChunk.setColumn_index_offset(indexOffsets.offset);
+                            columnChunk.setColumn_index_length(indexOffsets.length);
+                        }
+                    }
+
+                    // Set offset index offsets if available
+                    if (group < offsetIndexOffsetsList.size() && col < offsetIndexOffsetsList.get(group).size()) {
+                        IndexOffsets indexOffsets = offsetIndexOffsetsList.get(group).get(col);
+                        if (indexOffsets != null) {
+                            columnChunk.setOffset_index_offset(indexOffsets.offset);
+                            columnChunk.setOffset_index_length(indexOffsets.length);
+                        }
+                    }
+
+                    columnChunks.add(columnChunk);
+                }
+
+                fileFooter.addRowGroup(new RowGroup(columnChunks, metadata.totalUncompressedBytes, metadata.rows)
+                        .setTotal_compressed_size(metadata.totalCompressedBytes)
+                        .setFile_offset(metadata.fileOffset));
+            }
+
             fileMetaData = fileFooter.createFileMetadata();
-            writeBloomFilters(fileMetaData.getRow_groups(), bloomFilterGroups.build());
             writeFooter();
         }
         bufferedBytes = 0;
@@ -358,12 +411,15 @@ public class ParquetWriter
         }
 
         bloomFilterGroups.add(bufferDataList.stream().map(BufferData::getBloomFilter).collect(toImmutableList()));
+        columnIndexGroups.add(bufferDataList.stream().map(BufferData::getColumnIndex).collect(toImmutableList()));
+        offsetIndexGroups.add(bufferDataList.stream().map(BufferData::getOffsetIndex).collect(toImmutableList()));
     }
 
     private void writeFooter()
             throws IOException
     {
         checkState(closed);
+
         Slice footer = serializeFooter(fileMetaData);
         recordValidation(validation -> validation.setRowGroups(fileMetaData.getRow_groups()));
         createDataOutput(footer).writeData(outputStream);
@@ -375,13 +431,17 @@ public class ParquetWriter
         createDataOutput(MAGIC).writeData(outputStream);
     }
 
-    private void writeBloomFilters(List<RowGroup> rowGroups, List<List<Optional<BloomFilter>>> rowGroupBloomFilters)
+    private void writeBloomFilters(List<RowGroupMetadata> rowGroupMetadata, List<List<Optional<BloomFilter>>> rowGroupBloomFilters)
     {
-        checkArgument(rowGroups.size() == rowGroupBloomFilters.size(), "Row groups size %s should match row group Bloom filter size %s", rowGroups.size(), rowGroupBloomFilters.size());
-        for (int group = 0; group < rowGroups.size(); group++) {
-            List<org.apache.parquet.format.ColumnChunk> columns = rowGroups.get(group).getColumns();
+        checkArgument(rowGroupMetadata.size() == rowGroupBloomFilters.size(),
+                "Row groups size %s should match row group Bloom filter size %s",
+                rowGroupMetadata.size(), rowGroupBloomFilters.size());
+
+        for (int group = 0; group < rowGroupMetadata.size(); group++) {
+            List<ColumnMetaData> columnMetaDataList = rowGroupMetadata.get(group).columnMetaData;
             List<Optional<BloomFilter>> bloomFilters = rowGroupBloomFilters.get(group);
-            for (int i = 0; i < columns.size(); i++) {
+
+            for (int i = 0; i < columnMetaDataList.size(); i++) {
                 if (bloomFilters.get(i).isEmpty()) {
                     continue;
                 }
@@ -399,7 +459,7 @@ public class ParquetWriter
                             null,
                             null);
                     bloomFilter.writeTo(outputStream);
-                    columns.get(i).getMeta_data().setBloom_filter_offset(bloomFilterOffset);
+                    columnMetaDataList.get(i).setBloom_filter_offset(bloomFilterOffset);
                 }
                 catch (IOException e) {
                     throw new UncheckedIOException(e);
@@ -408,14 +468,72 @@ public class ParquetWriter
         }
     }
 
+    private List<List<IndexOffsets>> writeColumnIndexes(List<List<Optional<ColumnIndex>>> rowGroupColumnIndexes)
+    {
+        List<List<IndexOffsets>> result = new ArrayList<>();
+
+        for (int group = 0; group < rowGroupColumnIndexes.size(); group++) {
+            List<Optional<ColumnIndex>> columnIndexes = rowGroupColumnIndexes.get(group);
+            List<IndexOffsets> groupOffsets = new ArrayList<>();
+
+            for (int i = 0; i < columnIndexes.size(); i++) {
+                if (columnIndexes.get(i).isEmpty()) {
+                    groupOffsets.add(null);
+                    continue;
+                }
+
+                ColumnIndex columnIndex = columnIndexes.get(i).orElseThrow();
+                long columnIndexOffset = outputStream.longSize();
+                try {
+                    Util.writeColumnIndex(columnIndex, outputStream, null, null);
+                    long columnIndexLength = outputStream.longSize() - columnIndexOffset;
+                    groupOffsets.add(new IndexOffsets(columnIndexOffset, (int) columnIndexLength));
+                }
+                catch (IOException e) {
+                    throw new UncheckedIOException(e);
+                }
+            }
+            result.add(groupOffsets);
+        }
+        return result;
+    }
+
+    private List<List<IndexOffsets>> writeOffsetIndexes(List<List<Optional<OffsetIndex>>> rowGroupOffsetIndexes)
+    {
+        List<List<IndexOffsets>> result = new ArrayList<>();
+
+        for (int group = 0; group < rowGroupOffsetIndexes.size(); group++) {
+            List<Optional<OffsetIndex>> offsetIndexes = rowGroupOffsetIndexes.get(group);
+            List<IndexOffsets> groupOffsets = new ArrayList<>();
+
+            for (int i = 0; i < offsetIndexes.size(); i++) {
+                if (offsetIndexes.get(i).isEmpty()) {
+                    groupOffsets.add(null);
+                    continue;
+                }
+
+                OffsetIndex offsetIndex = offsetIndexes.get(i).orElseThrow();
+                long offsetIndexOffset = outputStream.longSize();
+                try {
+                    Util.writeOffsetIndex(offsetIndex, outputStream, null, null);
+                    long offsetIndexLength = outputStream.longSize() - offsetIndexOffset;
+                    groupOffsets.add(new IndexOffsets(offsetIndexOffset, (int) offsetIndexLength));
+                }
+                catch (IOException e) {
+                    throw new UncheckedIOException(e);
+                }
+            }
+            result.add(groupOffsets);
+        }
+        return result;
+    }
+
     private void updateRowGroups(List<ColumnMetaData> columnMetaData, long fileOffset)
     {
         long totalCompressedBytes = columnMetaData.stream().mapToLong(ColumnMetaData::getTotal_compressed_size).sum();
         long totalBytes = columnMetaData.stream().mapToLong(ColumnMetaData::getTotal_uncompressed_size).sum();
-        List<org.apache.parquet.format.ColumnChunk> columnChunks = columnMetaData.stream().map(ParquetWriter::toColumnChunk).collect(toImmutableList());
-        fileFooter.addRowGroup(new RowGroup(columnChunks, totalBytes, rows)
-                .setTotal_compressed_size(totalCompressedBytes)
-                .setFile_offset(fileOffset));
+        // Store metadata for later - RowGroup will be created after indexes are written
+        rowGroupMetadataList.add(new RowGroupMetadata(columnMetaData, totalCompressedBytes, totalBytes, rows, fileOffset));
     }
 
     private static Slice serializeFooter(FileMetaData fileMetaData)
@@ -451,6 +569,41 @@ public class ParquetWriter
                 compressionCodec,
                 writerOption,
                 parquetTimeZone);
+    }
+
+    private static class RowGroupMetadata
+    {
+        private final List<ColumnMetaData> columnMetaData;
+        private final long totalCompressedBytes;
+        private final long totalUncompressedBytes;
+        private final int rows;
+        private final long fileOffset;
+
+        private RowGroupMetadata(
+                List<ColumnMetaData> columnMetaData,
+                long totalCompressedBytes,
+                long totalUncompressedBytes,
+                int rows,
+                long fileOffset)
+        {
+            this.columnMetaData = requireNonNull(columnMetaData, "columnMetaData is null");
+            this.totalCompressedBytes = totalCompressedBytes;
+            this.totalUncompressedBytes = totalUncompressedBytes;
+            this.rows = rows;
+            this.fileOffset = fileOffset;
+        }
+    }
+
+    private static class IndexOffsets
+    {
+        private final long offset;
+        private final int length;
+
+        private IndexOffsets(long offset, int length)
+        {
+            this.offset = offset;
+            this.length = length;
+        }
     }
 
     private static class FileFooter

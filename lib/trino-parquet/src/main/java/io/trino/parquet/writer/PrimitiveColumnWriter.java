@@ -93,6 +93,7 @@ public class PrimitiveColumnWriter
     private final Map<org.apache.parquet.format.Encoding, Integer> dictionaryPagesWithEncoding = new HashMap<>();
     private final Statistics<?> columnStatistics;
     private final Optional<BloomFilter> bloomFilter;
+    private final PageStatisticsCollector pageStatisticsCollector;
     private long totalCompressedSize;
     private long totalUnCompressedSize;
     private long totalValues;
@@ -132,6 +133,7 @@ public class PrimitiveColumnWriter
         this.pageSizeThreshold = pageSizeThreshold;
         this.pageValueCountLimit = pageValueCountLimit;
         this.columnStatistics = Statistics.createStats(columnDescriptor.getPrimitiveType());
+        this.pageStatisticsCollector = new PageStatisticsCollector(columnDescriptor.getPrimitiveType());
         this.compressedOutputStream = new ChunkedSliceOutput(MINIMUM_OUTPUT_BUFFER_CHUNK_SIZE, MAXIMUM_OUTPUT_BUFFER_CHUNK_SIZE);
         this.bloomFilter = requireNonNull(bloomFilter, "bloomFilter is null");
     }
@@ -194,7 +196,9 @@ public class PrimitiveColumnWriter
                 dataStreams.data(),
                 dataStreams.dictionaryPageSize(),
                 isOnlyDictionaryEncodingPages ? Optional.empty() : dataStreams.bloomFilter(),
-                columnMetaData));
+                columnMetaData,
+                pageStatisticsCollector.buildColumnIndex(),
+                pageStatisticsCollector.buildOffsetIndex()));
     }
 
     // Returns ColumnMetaData that offset is invalid
@@ -245,6 +249,7 @@ public class PrimitiveColumnWriter
         statistics.incrementNumNulls(currentPageNullCounts);
         columnStatistics.mergeStatistics(statistics);
 
+        long pageStartOffset = totalCompressedSize;
         int writtenBytesSoFar = compressedOutputStream.size();
         PageHeader header = dataPageV1Header(
                 uncompressedSize,
@@ -266,6 +271,9 @@ public class PrimitiveColumnWriter
 
         pageData.writeData(compressedOutputStream);
         pageBufferedBytes += pageCompressedSize;
+
+        // Collect page statistics for ColumnIndex and OffsetIndex
+        pageStatisticsCollector.addPageStatistics(statistics, pageStartOffset, pageCompressedSize, valueCount);
 
         // Add encoding should be called after ValuesWriter#getBytes() and before ValuesWriter#reset()
         encodings.add(repetitionLevelWriter.getEncoding());

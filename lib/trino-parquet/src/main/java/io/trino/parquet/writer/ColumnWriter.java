@@ -14,7 +14,9 @@
 package io.trino.parquet.writer;
 
 import org.apache.parquet.column.values.bloomfilter.BloomFilter;
+import org.apache.parquet.format.ColumnIndex;
 import org.apache.parquet.format.ColumnMetaData;
+import org.apache.parquet.format.OffsetIndex;
 
 import java.io.IOException;
 import java.util.List;
@@ -43,13 +45,23 @@ public interface ColumnWriter
         private final List<ParquetDataOutput> data;
         private final OptionalInt dictionaryPageSize;
         private final Optional<BloomFilter> bloomFilter;
+        private final Optional<ColumnIndex> columnIndex;
+        private final Optional<OffsetIndex> offsetIndex;
 
-        public BufferData(List<ParquetDataOutput> data, OptionalInt dictionaryPageSize, Optional<BloomFilter> bloomFilter, ColumnMetaData metaData)
+        public BufferData(
+                List<ParquetDataOutput> data,
+                OptionalInt dictionaryPageSize,
+                Optional<BloomFilter> bloomFilter,
+                ColumnMetaData metaData,
+                Optional<ColumnIndex> columnIndex,
+                Optional<OffsetIndex> offsetIndex)
         {
             this.data = requireNonNull(data, "data is null");
             this.dictionaryPageSize = requireNonNull(dictionaryPageSize, "dictionaryPageSize is null");
             this.bloomFilter = requireNonNull(bloomFilter, "bloomFilter is null");
             this.metaData = requireNonNull(metaData, "metaData is null");
+            this.columnIndex = requireNonNull(columnIndex, "columnIndex is null");
+            this.offsetIndex = requireNonNull(offsetIndex, "offsetIndex is null");
         }
 
         public ColumnMetaData getMetaData()
@@ -70,6 +82,16 @@ public interface ColumnWriter
         public Optional<BloomFilter> getBloomFilter()
         {
             return bloomFilter;
+        }
+
+        public Optional<ColumnIndex> getColumnIndex()
+        {
+            return columnIndex;
+        }
+
+        public Optional<OffsetIndex> getOffsetIndex()
+        {
+            return offsetIndex;
         }
     }
 }
