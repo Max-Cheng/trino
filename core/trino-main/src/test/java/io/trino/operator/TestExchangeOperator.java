@@ -98,19 +98,19 @@ public class TestExchangeOperator
 
         directExchangeClientSupplier = (
                 queryId, exchangeId, span, memoryContext, taskFailureListener, retryPolicy) -> new DirectExchangeClient(
-                "",
-                "localhost",
-                DataIntegrityVerification.ABORT,
-                new StreamingDirectExchangeBuffer(scheduler, DataSize.of(32, MEGABYTE)),
-                DataSize.of(10, MEGABYTE),
-                3,
-                new Duration(1, TimeUnit.MINUTES),
-                true,
-                httpClient,
-                scheduler,
-                memoryContext,
-                pageBufferClientCallbackExecutor,
-                taskFailureListener);
+                        "",
+                        "localhost",
+                        DataIntegrityVerification.ABORT,
+                        new StreamingDirectExchangeBuffer(scheduler, DataSize.of(32, MEGABYTE)),
+                        DataSize.of(10, MEGABYTE),
+                        3,
+                        new Duration(1, TimeUnit.MINUTES),
+                        true,
+                        httpClient,
+                        scheduler,
+                        memoryContext,
+                        pageBufferClientCallbackExecutor,
+                        taskFailureListener);
     }
 
     @AfterAll

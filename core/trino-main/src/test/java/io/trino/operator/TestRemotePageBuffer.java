@@ -29,7 +29,9 @@ import io.trino.execution.StageId;
 import io.trino.execution.TaskId;
 import io.trino.execution.buffer.PageDeserializer;
 import io.trino.execution.buffer.PagesSerdeFactory;
-import io.trino.operator.HttpPageBufferClient.ClientCallback;
+import io.trino.operator.pagebuffer.PageBufferCallBack;
+import io.trino.operator.pagebuffer.PageBufferResolver;
+import io.trino.operator.pagebuffer.remote.RemotePageBuffer;
 import io.trino.spi.HostAddress;
 import io.trino.spi.Page;
 import io.trino.spi.TrinoException;
@@ -76,7 +78,7 @@ import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
 @TestInstance(PER_CLASS)
 @Execution(CONCURRENT)
-public class TestHttpPageBufferClient
+public class TestRemotePageBuffer
 {
     private ScheduledExecutorService scheduler;
     private ExecutorService pageBufferClientCallbackExecutor;
@@ -117,7 +119,7 @@ public class TestHttpPageBufferClient
         TestingClientCallback callback = new TestingClientCallback(requestComplete);
 
         URI location = URI.create("http://localhost:8080");
-        HttpPageBufferClient client = new HttpPageBufferClient(
+        RemotePageBuffer client = new RemotePageBuffer(
                 "localhost",
                 new TestingHttpClient(processor, scheduler),
                 DataIntegrityVerification.ABORT,
@@ -206,7 +208,7 @@ public class TestHttpPageBufferClient
         TestingClientCallback callback = new TestingClientCallback(requestComplete);
 
         URI location = URI.create("http://localhost:8080");
-        HttpPageBufferClient client = new HttpPageBufferClient(
+        RemotePageBuffer client = new RemotePageBuffer(
                 "localhost",
                 new TestingHttpClient(processor, scheduler),
                 DataIntegrityVerification.ABORT,
@@ -250,7 +252,7 @@ public class TestHttpPageBufferClient
         TestingClientCallback callback = new TestingClientCallback(requestComplete);
 
         URI location = URI.create("http://localhost:8080");
-        HttpPageBufferClient client = new HttpPageBufferClient(
+        RemotePageBuffer client = new RemotePageBuffer(
                 "localhost",
                 new TestingHttpClient(processor, scheduler),
                 DataIntegrityVerification.ABORT,
@@ -323,7 +325,7 @@ public class TestHttpPageBufferClient
         TestingClientCallback callback = new TestingClientCallback(requestComplete);
 
         URI location = URI.create("http://localhost:8080");
-        HttpPageBufferClient client = new HttpPageBufferClient(
+        RemotePageBuffer client = new RemotePageBuffer(
                 "localhost",
                 new TestingHttpClient(processor, scheduler),
                 DataIntegrityVerification.ABORT,
@@ -381,7 +383,7 @@ public class TestHttpPageBufferClient
         TestingClientCallback callback = new TestingClientCallback(requestComplete);
 
         URI location = URI.create("http://localhost:8080");
-        HttpPageBufferClient client = new HttpPageBufferClient(
+        RemotePageBuffer client = new RemotePageBuffer(
                 "localhost",
                 new TestingHttpClient(processor, scheduler),
                 DataIntegrityVerification.ABORT,
@@ -445,7 +447,7 @@ public class TestHttpPageBufferClient
     @Test
     public void testAverageSizeOfRequest()
     {
-        HttpPageBufferClient client = new HttpPageBufferClient(
+        RemotePageBuffer client = new RemotePageBuffer(
                 "localhost",
                 new TestingHttpClient(new MockExchangeRequestProcessor(DataSize.of(10, MEGABYTE)), scheduler),
                 DataIntegrityVerification.ABORT,
@@ -484,14 +486,14 @@ public class TestHttpPageBufferClient
         TestingClientCallback callback = new TestingClientCallback(requestComplete)
         {
             @Override
-            public boolean addPages(HttpPageBufferClient client, List<Slice> pages)
+            public boolean addPages(PageBufferResolver client, List<Slice> pages)
             {
                 addPagesCalled.set(true);
                 throw expectedException;
             }
         };
 
-        HttpPageBufferClient client = new HttpPageBufferClient(
+        RemotePageBuffer client = new RemotePageBuffer(
                 "localhost",
                 new TestingHttpClient(processor, scheduler),
                 DataIntegrityVerification.ABORT,
@@ -521,7 +523,7 @@ public class TestHttpPageBufferClient
     }
 
     private static void assertStatus(
-            HttpPageBufferClient client,
+            RemotePageBuffer client,
             URI location, String status,
             int pagesReceived,
             int requestsScheduled,
@@ -558,7 +560,7 @@ public class TestHttpPageBufferClient
     }
 
     private static class TestingClientCallback
-            implements ClientCallback
+            implements PageBufferCallBack
     {
         private final PagesSerdeFactory serdeFactory = createTestingPagesSerdeFactory(LZ4);
 
@@ -603,28 +605,28 @@ public class TestHttpPageBufferClient
         }
 
         @Override
-        public boolean addPages(HttpPageBufferClient client, List<Slice> pages)
+        public boolean addPages(PageBufferResolver client, List<Slice> pages)
         {
             this.pages.addAll(pages);
             return true;
         }
 
         @Override
-        public void requestComplete(HttpPageBufferClient client)
+        public void requestComplete(PageBufferResolver client)
         {
             completedRequests.getAndIncrement();
             awaitDone();
         }
 
         @Override
-        public void clientFinished(HttpPageBufferClient client)
+        public void clientFinished(PageBufferResolver client)
         {
             finishedBuffers.getAndIncrement();
             awaitDone();
         }
 
         @Override
-        public void clientFailed(HttpPageBufferClient client, Throwable cause)
+        public void clientFailed(PageBufferResolver client, Throwable cause)
         {
             failedBuffers.getAndIncrement();
             failure.compareAndSet(null, cause);

@@ -22,14 +22,13 @@ import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.opentelemetry.api.trace.Span;
 import io.trino.FeaturesConfig;
-import io.trino.FeaturesConfig.DataIntegrityVerification;
 import io.trino.exchange.ExchangeManagerRegistry;
 import io.trino.exchange.ExchangeMetricsCollector;
 import io.trino.execution.TaskFailureListener;
 import io.trino.memory.context.LocalMemoryContext;
+import io.trino.operator.pagebuffer.PageBufferResolverFactory;
 import io.trino.spi.QueryId;
 import io.trino.spi.exchange.ExchangeId;
-import jakarta.annotation.PreDestroy;
 import org.weakref.jmx.Managed;
 import org.weakref.jmx.Nested;
 
@@ -39,20 +38,16 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
 
 import static com.google.common.base.Preconditions.checkArgument;
-import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static java.util.Objects.requireNonNull;
-import static java.util.concurrent.Executors.newFixedThreadPool;
 
 public class DirectExchangeClientFactory
         implements DirectExchangeClientSupplier
 {
     private final NodeInfo nodeInfo;
-    private final DataIntegrityVerification dataIntegrityVerification;
     private final DataSize maxBufferedBytes;
     private final DataSize deduplicationBufferSize;
     private final int concurrentRequestMultiplier;
     private final Duration maxErrorDuration;
-    private final HttpClient httpClient;
     private final DataSize maxResponseSize;
     private final boolean acknowledgePages;
     private final ScheduledExecutorService scheduler;
@@ -60,6 +55,7 @@ public class DirectExchangeClientFactory
     private final ExecutorService pageBufferClientCallbackExecutor;
     private final ExchangeManagerRegistry exchangeManagerRegistry;
     private final Optional<ExchangeMetricsCollector> exchangeMetricsCollector;
+    private final PageBufferResolverFactory pageBufferResolverFactory;
 
     @Inject
     public DirectExchangeClientFactory(
@@ -69,12 +65,13 @@ public class DirectExchangeClientFactory
             @ForExchange HttpClient httpClient,
             @ForExchange HttpClientConfig httpClientConfig,
             @ForExchange ScheduledExecutorService scheduler,
+            @ForPageBufferCallback ExecutorService pageBufferClientCallbackExecutor,
             ExchangeManagerRegistry exchangeManagerRegistry,
-            Optional<ExchangeMetricsCollector> exchangeMetricsCollector)
+            Optional<ExchangeMetricsCollector> exchangeMetricsCollector,
+            PageBufferResolverFactory pageBufferResolverFactory)
     {
         this(
                 nodeInfo,
-                featuresConfig.getExchangeDataIntegrityVerification(),
                 config.getMaxBufferSize(),
                 config.getDeduplicationBufferSize(),
                 config.getMaxResponseSize(),
@@ -82,16 +79,15 @@ public class DirectExchangeClientFactory
                 config.getConcurrentRequestMultiplier(),
                 config.getMaxErrorDuration(),
                 config.isAcknowledgePages(),
-                config.getPageBufferClientMaxCallbackThreads(),
-                httpClient,
                 scheduler,
+                pageBufferClientCallbackExecutor,
                 exchangeManagerRegistry,
-                exchangeMetricsCollector);
+                exchangeMetricsCollector,
+                pageBufferResolverFactory);
     }
 
     public DirectExchangeClientFactory(
             NodeInfo nodeInfo,
-            DataIntegrityVerification dataIntegrityVerification,
             DataSize maxBufferedBytes,
             DataSize deduplicationBufferSize,
             DataSize maxResponseSize,
@@ -99,20 +95,18 @@ public class DirectExchangeClientFactory
             int concurrentRequestMultiplier,
             Duration maxErrorDuration,
             boolean acknowledgePages,
-            int pageBufferClientMaxCallbackThreads,
-            HttpClient httpClient,
             ScheduledExecutorService scheduler,
+            ExecutorService pageBufferClientCallbackExecutor,
             ExchangeManagerRegistry exchangeManagerRegistry,
-            Optional<ExchangeMetricsCollector> exchangeMetricsCollector)
+            Optional<ExchangeMetricsCollector> exchangeMetricsCollector,
+            PageBufferResolverFactory pageBufferResolverFactory)
     {
         this.nodeInfo = requireNonNull(nodeInfo, "nodeInfo is null");
-        this.dataIntegrityVerification = requireNonNull(dataIntegrityVerification, "dataIntegrityVerification is null");
         this.maxBufferedBytes = requireNonNull(maxBufferedBytes, "maxBufferedBytes is null");
         this.deduplicationBufferSize = requireNonNull(deduplicationBufferSize, "deduplicationBufferSize is null");
         this.concurrentRequestMultiplier = concurrentRequestMultiplier;
         this.maxErrorDuration = requireNonNull(maxErrorDuration, "maxErrorDuration is null");
         this.acknowledgePages = acknowledgePages;
-        this.httpClient = requireNonNull(httpClient, "httpClient is null");
 
         // Use only 0.75 of the maxResponseSize to leave room for additional bytes from the encoding
         // TODO figure out a better way to compute the size of data that will be transferred over the network
@@ -122,7 +116,7 @@ public class DirectExchangeClientFactory
 
         this.scheduler = requireNonNull(scheduler, "scheduler is null");
 
-        this.pageBufferClientCallbackExecutor = newFixedThreadPool(pageBufferClientMaxCallbackThreads, daemonThreadsNamed("page-buffer-client-callback-%s"));
+        this.pageBufferClientCallbackExecutor = requireNonNull(pageBufferClientCallbackExecutor, "pageBufferClientCallbackExecutor is null");
         this.executorMBean = new ThreadPoolExecutorMBean((ThreadPoolExecutor) pageBufferClientCallbackExecutor);
 
         checkArgument(maxBufferedBytes.toBytes() > 0, "maxBufferSize must be at least 1 byte: %s", maxBufferedBytes);
@@ -130,12 +124,7 @@ public class DirectExchangeClientFactory
         checkArgument(concurrentRequestMultiplier > 0, "concurrentRequestMultiplier must be at least 1: %s", concurrentRequestMultiplier);
         this.exchangeManagerRegistry = requireNonNull(exchangeManagerRegistry, "exchangeManagerRegistry is null");
         this.exchangeMetricsCollector = requireNonNull(exchangeMetricsCollector, "exchangeMetricsCollector is null");
-    }
-
-    @PreDestroy
-    public void stop()
-    {
-        pageBufferClientCallbackExecutor.shutdownNow();
+        this.pageBufferResolverFactory = requireNonNull(pageBufferResolverFactory, "pageBufferResolverFactory is null");
     }
 
     @Managed
@@ -171,14 +160,12 @@ public class DirectExchangeClientFactory
 
         return new DirectExchangeClient(
                 nodeInfo.getNodeId(),
-                nodeInfo.getExternalAddress(),
-                dataIntegrityVerification,
                 buffer,
                 maxResponseSize,
                 concurrentRequestMultiplier,
                 maxErrorDuration,
                 acknowledgePages,
-                httpClient,
+                pageBufferResolverFactory,
                 scheduler,
                 memoryContext,
                 pageBufferClientCallbackExecutor,

@@ -85,6 +85,7 @@ import io.trino.operator.DirectExchangeClientFactory;
 import io.trino.operator.DirectExchangeClientSupplier;
 import io.trino.operator.FlatHashStrategyCompiler;
 import io.trino.operator.ForExchange;
+import io.trino.operator.ForPageBufferCallback;
 import io.trino.operator.GroupByHashPageIndexerFactory;
 import io.trino.operator.NullSafeHashCompiler;
 import io.trino.operator.PagesIndex;
@@ -92,6 +93,7 @@ import io.trino.operator.PagesIndexPageSorter;
 import io.trino.operator.RetryPolicy;
 import io.trino.operator.index.IndexJoinLookupStats;
 import io.trino.operator.index.IndexManager;
+import io.trino.operator.pagebuffer.PageBufferResolverFactory;
 import io.trino.operator.scalar.json.JsonExistsFunction;
 import io.trino.operator.scalar.json.JsonQueryFunction;
 import io.trino.operator.scalar.json.JsonValueFunction;
@@ -167,6 +169,7 @@ import static io.airlift.bootstrap.ClosingBinder.closingBinder;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.airlift.concurrent.Threads.virtualThreadsNamed;
 import static io.airlift.configuration.ConfigBinder.configBinder;
+import static java.util.concurrent.Executors.newFixedThreadPool;
 import static io.airlift.jaxrs.JaxrsBinder.jaxrsBinder;
 import static io.airlift.json.JsonBinder.jsonBinder;
 import static io.airlift.json.JsonCodecBinder.jsonCodecBinder;
@@ -322,6 +325,7 @@ public class ServerMainModule
 
         // exchange client
         binder.bind(DirectExchangeClientSupplier.class).to(DirectExchangeClientFactory.class).in(Scopes.SINGLETON);
+        binder.bind(PageBufferResolverFactory.class).in(Scopes.SINGLETON);
         newOptionalBinder(binder, ExchangeMetricsCollector.class);
 
         InternalCommunicationConfig internalCommunicationConfig = buildConfigObject(InternalCommunicationConfig.class);
@@ -481,6 +485,17 @@ public class ServerMainModule
         closingBinder(binder).registerExecutor(Key.get(ScheduledExecutorService.class, ForExchange.class));
         closingBinder(binder).registerExecutor(Key.get(ExecutorService.class, ForAsyncHttp.class));
         closingBinder(binder).registerExecutor(Key.get(ScheduledExecutorService.class, ForAsyncHttp.class));
+        closingBinder(binder).registerExecutor(Key.get(ExecutorService.class, ForPageBufferCallback.class));
+    }
+
+    @Provides
+    @Singleton
+    @ForPageBufferCallback
+    public static ExecutorService createPageBufferCallbackExecutor(DirectExchangeClientConfig config)
+    {
+        return newFixedThreadPool(
+                config.getPageBufferClientMaxCallbackThreads(),
+                daemonThreadsNamed("page-buffer-client-callback-%s"));
     }
 
     @Provides

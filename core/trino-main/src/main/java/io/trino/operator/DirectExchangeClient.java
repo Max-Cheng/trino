@@ -28,8 +28,10 @@ import io.trino.FeaturesConfig.DataIntegrityVerification;
 import io.trino.execution.TaskFailureListener;
 import io.trino.execution.TaskId;
 import io.trino.memory.context.LocalMemoryContext;
-import io.trino.operator.HttpPageBufferClient.ClientCallback;
 import io.trino.operator.WorkProcessor.ProcessState;
+import io.trino.operator.pagebuffer.PageBufferCallBack;
+import io.trino.operator.pagebuffer.PageBufferResolver;
+import io.trino.operator.pagebuffer.PageBufferResolverFactory;
 import io.trino.plugin.base.metrics.TDigestHistogram;
 import jakarta.annotation.Nullable;
 
@@ -59,26 +61,24 @@ public class DirectExchangeClient
     private static final Logger log = Logger.get(DirectExchangeClient.class);
 
     private final String selfNodeId;
-    private final String selfAddress;
-    private final DataIntegrityVerification dataIntegrityVerification;
     private final DataSize maxResponseSize;
     private final int concurrentRequestMultiplier;
     private final Duration maxErrorDuration;
     private final boolean acknowledgePages;
-    private final HttpClient httpClient;
+    private final PageBufferResolverFactory pageBufferResolverFactory;
     private final ScheduledExecutorService scheduledExecutor;
 
     @GuardedBy("this")
     private boolean noMoreLocations;
 
-    private final Map<URI, HttpPageBufferClient> allClients = new ConcurrentHashMap<>();
+    private final Map<URI, PageBufferResolver> allClients = new ConcurrentHashMap<>();
 
     @GuardedBy("this")
-    private final Set<HttpPageBufferClient> queuedClients = new LinkedHashSet<>();
+    private final Set<PageBufferResolver> queuedClients = new LinkedHashSet<>();
     @GuardedBy("this")
-    private final Set<HttpPageBufferClient> runningClients = new LinkedHashSet<>();
+    private final Set<PageBufferResolver> runningClients = new LinkedHashSet<>();
 
-    private final Set<HttpPageBufferClient> completedClients = newConcurrentHashSet();
+    private final Set<PageBufferResolver> completedClients = newConcurrentHashSet();
     private final DirectExchangeBuffer buffer;
 
     @GuardedBy("this")
@@ -103,29 +103,25 @@ public class DirectExchangeClient
     // Please change that method accordingly when this assumption becomes not true.
     public DirectExchangeClient(
             String selfNodeId,
-            String selfAddress,
-            DataIntegrityVerification dataIntegrityVerification,
             DirectExchangeBuffer buffer,
             DataSize maxResponseSize,
             int concurrentRequestMultiplier,
             Duration maxErrorDuration,
             boolean acknowledgePages,
-            HttpClient httpClient,
+            PageBufferResolverFactory pageBufferResolverFactory,
             ScheduledExecutorService scheduledExecutor,
             LocalMemoryContext memoryContext,
             Executor pageBufferClientCallbackExecutor,
             TaskFailureListener taskFailureListener)
     {
         this.selfNodeId = requireNonNull(selfNodeId, "selfNodeID is null");
-        this.selfAddress = requireNonNull(selfAddress, "selfAddress is null");
-        this.dataIntegrityVerification = requireNonNull(dataIntegrityVerification, "dataIntegrityVerification is null");
         this.buffer = requireNonNull(buffer, "buffer is null");
         this.maxResponseSize = maxResponseSize;
         this.concurrentRequestMultiplier = concurrentRequestMultiplier;
         this.maxErrorDuration = maxErrorDuration;
         this.acknowledgePages = acknowledgePages;
-        this.httpClient = httpClient;
-        this.scheduledExecutor = scheduledExecutor;
+        this.pageBufferResolverFactory = requireNonNull(pageBufferResolverFactory, "pageBufferResolverFactory is null");
+        this.scheduledExecutor = requireNonNull(scheduledExecutor, "scheduledExecutor is null");
         this.memoryContext = memoryContext;
         this.pageBufferClientCallbackExecutor = requireNonNull(pageBufferClientCallbackExecutor, "pageBufferClientCallbackExecutor is null");
         this.taskFailureListener = requireNonNull(taskFailureListener, "taskFailureListener is null");
@@ -137,7 +133,7 @@ public class DirectExchangeClient
         // It does not guarantee a consistent view between different exchange clients.
         // Guaranteeing a consistent view introduces significant lock contention.
         ImmutableList.Builder<PageBufferClientStatus> pageBufferClientStatusBuilder = ImmutableList.builder();
-        for (HttpPageBufferClient client : allClients.values()) {
+        for (PageBufferResolver client : allClients.values()) {
             pageBufferClientStatusBuilder.add(client.getStatus());
         }
         List<PageBufferClientStatus> pageBufferClientStatus = pageBufferClientStatusBuilder.build();
@@ -170,19 +166,25 @@ public class DirectExchangeClient
 
         checkState(!noMoreLocations, "No more locations already set");
         buffer.addTask(taskId);
-        // TODO:LocalPageBufferPuller impl
-        HttpPageBufferClient client = new HttpPageBufferClient(
-                selfAddress,
-                httpClient,
-                dataIntegrityVerification,
-                maxResponseSize,
-                maxErrorDuration,
-                acknowledgePages,
-                taskId,
-                location,
-                new ExchangeClientCallback(),
-                scheduledExecutor,
-                pageBufferClientCallbackExecutor);
+
+        PageBufferResolver client;
+        if (isFromSameNode(taskNodeId)) {
+            client = pageBufferResolverFactory.createLocalPageBuffer(
+                    maxResponseSize,
+                    maxErrorDuration,
+                    taskId,
+                    location,
+                    new RemotePageResolverCallback());
+        }
+        else {
+            client = pageBufferResolverFactory.createRemotePageBuffer(
+                    maxResponseSize,
+                    maxErrorDuration,
+                    acknowledgePages,
+                    taskId,
+                    location,
+                    new RemotePageResolverCallback());
+        }
         allClients.put(location, client);
         queuedClients.add(client);
 
@@ -257,7 +259,7 @@ public class DirectExchangeClient
         }
         closed = true;
 
-        for (HttpPageBufferClient client : allClients.values()) {
+        for (PageBufferResolver client : allClients.values()) {
             closeQuietly(client);
         }
         try {
@@ -284,14 +286,14 @@ public class DirectExchangeClient
         }
 
         long reservedBytesForScheduledClients = runningClients.stream()
-                .mapToLong(HttpPageBufferClient::getAverageRequestSizeInBytes)
+                .mapToLong(PageBufferResolver::getAverageRequestSizeInBytes)
                 .sum();
         long projectedBytesToBeRequested = 0;
         int clientCount = 0;
 
-        Iterator<HttpPageBufferClient> clientIterator = queuedClients.iterator();
+        Iterator<PageBufferResolver> clientIterator = queuedClients.iterator();
         while (clientIterator.hasNext()) {
-            HttpPageBufferClient client = clientIterator.next();
+            PageBufferResolver client = clientIterator.next();
             if (projectedBytesToBeRequested >= neededBytes * concurrentRequestMultiplier - reservedBytesForScheduledClients) {
                 break;
             }
@@ -315,24 +317,24 @@ public class DirectExchangeClient
     }
 
     @VisibleForTesting
-    Set<HttpPageBufferClient> getQueuedClients()
+    Set<PageBufferResolver> getQueuedClients()
     {
         return queuedClients;
     }
 
     @VisibleForTesting
-    Set<HttpPageBufferClient> getRunningClients()
+    Set<PageBufferResolver> getRunningClients()
     {
         return runningClients;
     }
 
     @VisibleForTesting
-    Map<URI, HttpPageBufferClient> getAllClients()
+    Map<URI, PageBufferResolver> getAllClients()
     {
         return allClients;
     }
 
-    private boolean addPages(HttpPageBufferClient client, List<Slice> pages)
+    private boolean addPages(PageBufferResolver client, List<Slice> pages)
     {
         // If client is already completed, addPages is a no-op
         if (completedClients.contains(client)) {
@@ -392,7 +394,7 @@ public class DirectExchangeClient
         }
     }
 
-    private synchronized void requestComplete(HttpPageBufferClient client)
+    private synchronized void requestComplete(PageBufferResolver client)
     {
         requestDuration.add(client.getLastRequestDurationMillis());
         if (!completedClients.contains(client) && !queuedClients.contains(client)) {
@@ -402,7 +404,7 @@ public class DirectExchangeClient
         scheduleRequestIfNecessary();
     }
 
-    private synchronized void clientFinished(HttpPageBufferClient client)
+    private synchronized void clientFinished(PageBufferResolver client)
     {
         requireNonNull(client, "client is null");
         if (completedClients.add(client)) {
@@ -412,7 +414,7 @@ public class DirectExchangeClient
         scheduleRequestIfNecessary();
     }
 
-    private synchronized void clientFailed(HttpPageBufferClient client, Throwable cause)
+    private synchronized void clientFailed(PageBufferResolver client, Throwable cause)
     {
         requireNonNull(client, "client is null");
         if (completedClients.add(client)) {
@@ -424,11 +426,26 @@ public class DirectExchangeClient
         scheduleRequestIfNecessary();
     }
 
-    private class ExchangeClientCallback
-            implements ClientCallback
+    private boolean isFromSameNode(String targetNodeId)
+    {
+        return targetNodeId.equals(selfNodeId);
+    }
+
+    private static void closeQuietly(PageBufferResolver client)
+    {
+        try {
+            client.close();
+        }
+        catch (Exception e) {
+            // ignored
+        }
+    }
+
+    private class RemotePageResolverCallback
+            implements PageBufferCallBack
     {
         @Override
-        public boolean addPages(HttpPageBufferClient client, List<Slice> pages)
+        public boolean addPages(PageBufferResolver client, List<Slice> pages)
         {
             requireNonNull(client, "client is null");
             requireNonNull(pages, "pages is null");
@@ -436,34 +453,24 @@ public class DirectExchangeClient
         }
 
         @Override
-        public void requestComplete(HttpPageBufferClient client)
+        public void requestComplete(PageBufferResolver client)
         {
             requireNonNull(client, "client is null");
             DirectExchangeClient.this.requestComplete(client);
         }
 
         @Override
-        public void clientFinished(HttpPageBufferClient client)
+        public void clientFinished(PageBufferResolver client)
         {
             DirectExchangeClient.this.clientFinished(client);
         }
 
         @Override
-        public void clientFailed(HttpPageBufferClient client, Throwable cause)
+        public void clientFailed(PageBufferResolver client, Throwable cause)
         {
             requireNonNull(client, "client is null");
             requireNonNull(cause, "cause is null");
             DirectExchangeClient.this.clientFailed(client, cause);
-        }
-    }
-
-    private static void closeQuietly(HttpPageBufferClient client)
-    {
-        try {
-            client.close();
-        }
-        catch (RuntimeException e) {
-            // ignored
         }
     }
 }

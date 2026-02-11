@@ -42,6 +42,9 @@ import io.trino.execution.TaskId;
 import io.trino.execution.buffer.PageDeserializer;
 import io.trino.execution.buffer.PagesSerdeFactory;
 import io.trino.memory.context.SimpleLocalMemoryContext;
+import io.trino.operator.pagebuffer.PageBufferCallBack;
+import io.trino.operator.pagebuffer.PageBufferResolver;
+import io.trino.operator.pagebuffer.remote.RemotePageBuffer;
 import io.trino.spi.Page;
 import io.trino.spi.QueryId;
 import io.trino.spi.TrinoException;
@@ -1005,8 +1008,8 @@ public class TestDirectExchangeClient
         URI locationTwo = URI.create("http://localhost:8081");
         MockExchangeRequestProcessor processor = new MockExchangeRequestProcessor(maxResponseSize);
 
-        HttpPageBufferClient clientToBeUsed = createHttpPageBufferClient(processor, maxResponseSize, locationOne, new MockClientCallback());
-        HttpPageBufferClient clientToBeSkipped = createHttpPageBufferClient(processor, maxResponseSize, locationTwo, new MockClientCallback());
+        RemotePageBuffer clientToBeUsed = createHttpPageBufferClient(processor, maxResponseSize, locationOne, new MockClientCallback());
+        RemotePageBuffer clientToBeSkipped = createHttpPageBufferClient(processor, maxResponseSize, locationTwo, new MockClientCallback());
         clientToBeUsed.requestSucceeded(DataSize.of(33, Unit.MEGABYTE).toBytes());
         clientToBeSkipped.requestSucceeded(DataSize.of(1, Unit.MEGABYTE).toBytes());
 
@@ -1043,8 +1046,8 @@ public class TestDirectExchangeClient
         URI locationTwo = URI.create("http://localhost:8081");
         MockExchangeRequestProcessor processor = new MockExchangeRequestProcessor(maxResponseSize);
 
-        HttpPageBufferClient firstClient = createHttpPageBufferClient(processor, maxResponseSize, locationOne, new MockClientCallback());
-        HttpPageBufferClient secondClient = createHttpPageBufferClient(processor, maxResponseSize, locationTwo, new MockClientCallback());
+        RemotePageBuffer firstClient = createHttpPageBufferClient(processor, maxResponseSize, locationOne, new MockClientCallback());
+        RemotePageBuffer secondClient = createHttpPageBufferClient(processor, maxResponseSize, locationTwo, new MockClientCallback());
 
         @SuppressWarnings("resource")
         DirectExchangeClient exchangeClient = new DirectExchangeClient(
@@ -1079,8 +1082,8 @@ public class TestDirectExchangeClient
 
         MockExchangeRequestProcessor processor = new MockExchangeRequestProcessor(maxResponseSize);
 
-        HttpPageBufferClient pendingClient = createHttpPageBufferClient(processor, maxResponseSize, locationOne, new MockClientCallback());
-        HttpPageBufferClient clientToBeSkipped = createHttpPageBufferClient(processor, maxResponseSize, locationTwo, new MockClientCallback());
+        RemotePageBuffer pendingClient = createHttpPageBufferClient(processor, maxResponseSize, locationOne, new MockClientCallback());
+        RemotePageBuffer clientToBeSkipped = createHttpPageBufferClient(processor, maxResponseSize, locationTwo, new MockClientCallback());
 
         pendingClient.requestSucceeded(DataSize.of(33, Unit.MEGABYTE).toBytes());
 
@@ -1109,9 +1112,9 @@ public class TestDirectExchangeClient
         assertThat(exchangeClient.getRunningClients()).hasSize(1);
     }
 
-    private HttpPageBufferClient createHttpPageBufferClient(TestingHttpClient.Processor processor, DataSize expectedMaxSize, URI location, HttpPageBufferClient.ClientCallback callback)
+    private RemotePageBuffer createHttpPageBufferClient(TestingHttpClient.Processor processor, DataSize expectedMaxSize, URI location, PageBufferCallBack callback)
     {
-        return new HttpPageBufferClient(
+        return new RemotePageBuffer(
                 "localhost",
                 new TestingHttpClient(processor, scheduler),
                 DataIntegrityVerification.ABORT,
@@ -1176,21 +1179,21 @@ public class TestDirectExchangeClient
     }
 
     private static class MockClientCallback
-            implements HttpPageBufferClient.ClientCallback
+            implements PageBufferCallBack
     {
         @Override
-        public boolean addPages(HttpPageBufferClient client, List<Slice> pages)
+        public boolean addPages(PageBufferResolver client, List<Slice> pages)
         {
             return false;
         }
 
         @Override
-        public void requestComplete(HttpPageBufferClient client) {}
+        public void requestComplete(PageBufferResolver client) {}
 
         @Override
-        public void clientFinished(HttpPageBufferClient client) {}
+        public void clientFinished(PageBufferResolver client) {}
 
         @Override
-        public void clientFailed(HttpPageBufferClient client, Throwable cause) {}
+        public void clientFailed(PageBufferResolver client, Throwable cause) {}
     }
 }
