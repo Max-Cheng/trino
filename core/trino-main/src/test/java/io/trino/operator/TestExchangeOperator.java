@@ -96,7 +96,9 @@ public class TestExchangeOperator
         pageBufferClientCallbackExecutor = Executors.newSingleThreadExecutor();
         httpClient = new TestingHttpClient(new TestingExchangeHttpClientHandler(taskBuffers, SERDE_FACTORY), scheduler);
 
-        directExchangeClientSupplier = (queryId, exchangeId, span, memoryContext, taskFailureListener, retryPolicy) -> new DirectExchangeClient(
+        directExchangeClientSupplier = (
+                queryId, exchangeId, span, memoryContext, taskFailureListener, retryPolicy) -> new DirectExchangeClient(
+                "",
                 "localhost",
                 DataIntegrityVerification.ABORT,
                 new StreamingDirectExchangeBuffer(scheduler, DataSize.of(32, MEGABYTE)),
@@ -154,7 +156,7 @@ public class TestExchangeOperator
 
     private static Split newRemoteSplit(TaskId taskId)
     {
-        return new Split(REMOTE_CATALOG_HANDLE, new RemoteSplit(new DirectExchangeInput(taskId, "http://localhost/" + taskId)));
+        return new Split(REMOTE_CATALOG_HANDLE, new RemoteSplit(new DirectExchangeInput(taskId, "http://localhost/" + taskId, "")));
     }
 
     @Test

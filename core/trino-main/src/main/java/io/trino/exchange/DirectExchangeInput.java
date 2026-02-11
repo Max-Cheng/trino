@@ -29,14 +29,17 @@ public class DirectExchangeInput
 
     private final TaskId taskId;
     private final String location;
+    private final String nodeId;
 
     @JsonCreator
     public DirectExchangeInput(
             @JsonProperty("taskId") TaskId taskId,
-            @JsonProperty("location") String location)
+            @JsonProperty("location") String location,
+            @JsonProperty("nodeId") String nodeId)
     {
         this.taskId = requireNonNull(taskId, "taskId is null");
         this.location = requireNonNull(location, "location is null");
+        this.nodeId = requireNonNull(nodeId, "nodeId is null");
     }
 
     @JsonProperty
@@ -51,12 +54,19 @@ public class DirectExchangeInput
         return location;
     }
 
+    @JsonProperty
+    public String getNodeId()
+    {
+        return nodeId;
+    }
+
     @Override
     public String toString()
     {
         return toStringHelper(this)
                 .add("taskId", taskId)
                 .add("location", location)
+                .add("nodeId", nodeId)
                 .toString();
     }
 
@@ -65,6 +75,7 @@ public class DirectExchangeInput
     {
         return INSTANCE_SIZE
                 + taskId.getRetainedSizeInBytes()
-                + estimatedSizeOf(location);
+                + estimatedSizeOf(location)
+                + estimatedSizeOf(nodeId);
     }
 }

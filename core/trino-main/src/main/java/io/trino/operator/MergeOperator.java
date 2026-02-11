@@ -177,7 +177,7 @@ public class MergeOperator
         // Only fault tolerant execution mode is expected to execute external exchanges.
         // MergeOperator is used for distributed sort only and it is not compatible (and disabled) with fault tolerant execution mode.
         DirectExchangeInput exchangeInput = (DirectExchangeInput) remoteSplit.getExchangeInput();
-        client.addLocation(exchangeInput.getTaskId(), URI.create(exchangeInput.getLocation()));
+        client.addLocation(exchangeInput.getTaskId(), URI.create(exchangeInput.getLocation()), exchangeInput.getNodeId());
         client.noMoreLocations();
         pageProducers.add(client.pages()
                 .map(serializedPage -> {

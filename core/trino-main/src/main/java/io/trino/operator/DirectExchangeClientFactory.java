@@ -170,6 +170,7 @@ public class DirectExchangeClientFactory
         };
 
         return new DirectExchangeClient(
+                nodeInfo.getNodeId(),
                 nodeInfo.getExternalAddress(),
                 dataIntegrityVerification,
                 buffer,

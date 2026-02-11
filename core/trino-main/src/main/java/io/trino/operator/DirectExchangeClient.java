@@ -58,6 +58,7 @@ public class DirectExchangeClient
 {
     private static final Logger log = Logger.get(DirectExchangeClient.class);
 
+    private final String selfNodeId;
     private final String selfAddress;
     private final DataIntegrityVerification dataIntegrityVerification;
     private final DataSize maxResponseSize;
@@ -101,6 +102,7 @@ public class DirectExchangeClient
     // DirectExchangeClientStatus.mergeWith assumes all clients have the same bufferCapacity.
     // Please change that method accordingly when this assumption becomes not true.
     public DirectExchangeClient(
+            String selfNodeId,
             String selfAddress,
             DataIntegrityVerification dataIntegrityVerification,
             DirectExchangeBuffer buffer,
@@ -114,6 +116,7 @@ public class DirectExchangeClient
             Executor pageBufferClientCallbackExecutor,
             TaskFailureListener taskFailureListener)
     {
+        this.selfNodeId = requireNonNull(selfNodeId, "selfNodeID is null");
         this.selfAddress = requireNonNull(selfAddress, "selfAddress is null");
         this.dataIntegrityVerification = requireNonNull(dataIntegrityVerification, "dataIntegrityVerification is null");
         this.buffer = requireNonNull(buffer, "buffer is null");
@@ -153,7 +156,7 @@ public class DirectExchangeClient
         }
     }
 
-    public synchronized void addLocation(TaskId taskId, URI location)
+    public synchronized void addLocation(TaskId taskId, URI location, String taskNodeId)
     {
         requireNonNull(location, "location is null");
 
@@ -167,6 +170,7 @@ public class DirectExchangeClient
 
         checkState(!noMoreLocations, "No more locations already set");
         buffer.addTask(taskId);
+        // TODO:LocalPageBufferPuller impl
         HttpPageBufferClient client = new HttpPageBufferClient(
                 selfAddress,
                 httpClient,

@@ -95,7 +95,7 @@ public class DirectTrinoClient
 
                     outputInfo.drainInputs(input -> {
                         DirectExchangeInput exchangeInput = (DirectExchangeInput) input;
-                        exchangeClient.addLocation(exchangeInput.getTaskId(), URI.create(exchangeInput.getLocation()));
+                        exchangeClient.addLocation(exchangeInput.getTaskId(), URI.create(exchangeInput.getLocation()), exchangeInput.getNodeId());
                     });
                     if (outputInfo.isNoMoreInputs()) {
                         exchangeClient.noMoreLocations();

@@ -54,7 +54,7 @@ public class DirectExchangeDataSource
     public void addInput(ExchangeInput input)
     {
         DirectExchangeInput exchangeInput = (DirectExchangeInput) input;
-        directExchangeClient.addLocation(exchangeInput.getTaskId(), URI.create(exchangeInput.getLocation()));
+        directExchangeClient.addLocation(exchangeInput.getTaskId(), URI.create(exchangeInput.getLocation()), exchangeInput.getNodeId());
     }
 
     @Override
