@@ -37,7 +37,6 @@ import io.trino.spi.exchange.ExchangeId;
 import io.trino.spi.type.Type;
 import org.intellij.lang.annotations.Language;
 
-import java.net.URI;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ExecutionException;
@@ -95,7 +94,7 @@ public class DirectTrinoClient
 
                     outputInfo.drainInputs(input -> {
                         DirectExchangeInput exchangeInput = (DirectExchangeInput) input;
-                        exchangeClient.addLocation(exchangeInput.getTaskId(), URI.create(exchangeInput.getLocation()));
+                        exchangeClient.addInput(exchangeInput);
                     });
                     if (outputInfo.isNoMoreInputs()) {
                         exchangeClient.noMoreLocations();

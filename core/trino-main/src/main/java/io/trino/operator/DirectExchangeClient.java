@@ -18,6 +18,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.errorprone.annotations.ThreadSafe;
 import com.google.errorprone.annotations.concurrent.GuardedBy;
+import com.google.inject.Provider;
 import io.airlift.http.client.HttpClient;
 import io.airlift.log.Logger;
 import io.airlift.slice.Slice;
@@ -25,10 +26,13 @@ import io.airlift.stats.TDigest;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.trino.FeaturesConfig.DataIntegrityVerification;
+import io.trino.exchange.DirectExchangeInput;
+import io.trino.exchange.ExchangeInput;
+import io.trino.exchange.PassThroughExchangeInput;
+import io.trino.execution.SqlTaskManager;
 import io.trino.execution.TaskFailureListener;
 import io.trino.execution.TaskId;
 import io.trino.memory.context.LocalMemoryContext;
-import io.trino.operator.HttpPageBufferClient.ClientCallback;
 import io.trino.operator.WorkProcessor.ProcessState;
 import io.trino.plugin.base.metrics.TDigestHistogram;
 import jakarta.annotation.Nullable;
@@ -50,11 +54,12 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.Sets.newConcurrentHashSet;
+import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
 @ThreadSafe
 public class DirectExchangeClient
-        implements Closeable
+        implements Closeable, PageBufferCallBack
 {
     private static final Logger log = Logger.get(DirectExchangeClient.class);
 
@@ -70,14 +75,14 @@ public class DirectExchangeClient
     @GuardedBy("this")
     private boolean noMoreLocations;
 
-    private final Map<URI, HttpPageBufferClient> allClients = new ConcurrentHashMap<>();
+    private final Map<URI, PageBufferPoller> allClients = new ConcurrentHashMap<>();
 
     @GuardedBy("this")
-    private final Set<HttpPageBufferClient> queuedClients = new LinkedHashSet<>();
+    private final Set<PageBufferPoller> queuedClients = new LinkedHashSet<>();
     @GuardedBy("this")
-    private final Set<HttpPageBufferClient> runningClients = new LinkedHashSet<>();
+    private final Set<PageBufferPoller> runningClients = new LinkedHashSet<>();
 
-    private final Set<HttpPageBufferClient> completedClients = newConcurrentHashSet();
+    private final Set<PageBufferPoller> completedClients = newConcurrentHashSet();
     private final DirectExchangeBuffer buffer;
 
     @GuardedBy("this")
@@ -97,6 +102,7 @@ public class DirectExchangeClient
     private final Lock memoryContextWriteLock = memoryContextLock.writeLock();
     private final Executor pageBufferClientCallbackExecutor;
     private final TaskFailureListener taskFailureListener;
+    private final Provider<SqlTaskManager> sqlTaskManagerProvider;
 
     // DirectExchangeClientStatus.mergeWith assumes all clients have the same bufferCapacity.
     // Please change that method accordingly when this assumption becomes not true.
@@ -112,7 +118,8 @@ public class DirectExchangeClient
             ScheduledExecutorService scheduledExecutor,
             LocalMemoryContext memoryContext,
             Executor pageBufferClientCallbackExecutor,
-            TaskFailureListener taskFailureListener)
+            TaskFailureListener taskFailureListener,
+            Provider<SqlTaskManager> sqlTaskManagerProvider)
     {
         this.selfAddress = requireNonNull(selfAddress, "selfAddress is null");
         this.dataIntegrityVerification = requireNonNull(dataIntegrityVerification, "dataIntegrityVerification is null");
@@ -126,6 +133,7 @@ public class DirectExchangeClient
         this.memoryContext = memoryContext;
         this.pageBufferClientCallbackExecutor = requireNonNull(pageBufferClientCallbackExecutor, "pageBufferClientCallbackExecutor is null");
         this.taskFailureListener = requireNonNull(taskFailureListener, "taskFailureListener is null");
+        this.sqlTaskManagerProvider = sqlTaskManagerProvider;
     }
 
     public DirectExchangeClientStatus getStatus()
@@ -134,7 +142,7 @@ public class DirectExchangeClient
         // It does not guarantee a consistent view between different exchange clients.
         // Guaranteeing a consistent view introduces significant lock contention.
         ImmutableList.Builder<PageBufferClientStatus> pageBufferClientStatusBuilder = ImmutableList.builder();
-        for (HttpPageBufferClient client : allClients.values()) {
+        for (PageBufferPoller client : allClients.values()) {
             pageBufferClientStatusBuilder.add(client.getStatus());
         }
         List<PageBufferClientStatus> pageBufferClientStatus = pageBufferClientStatusBuilder.build();
@@ -153,9 +161,9 @@ public class DirectExchangeClient
         }
     }
 
-    public synchronized void addLocation(TaskId taskId, URI location)
+    public synchronized void addInput(ExchangeInput input)
     {
-        requireNonNull(location, "location is null");
+        requireNonNull(input, "input is null");
 
         // Ignore new locations after close
         // NOTE: this MUST happen before checking no more locations is checked
@@ -163,24 +171,52 @@ public class DirectExchangeClient
             return;
         }
 
-        checkArgument(!allClients.containsKey(location), "location already exist: %s", location);
+        TaskId taskId;
+        PageBufferPoller poller;
+        URI location;
 
-        checkState(!noMoreLocations, "No more locations already set");
-        buffer.addTask(taskId);
-        HttpPageBufferClient client = new HttpPageBufferClient(
-                selfAddress,
-                httpClient,
-                dataIntegrityVerification,
-                maxResponseSize,
-                maxErrorDuration,
-                acknowledgePages,
-                taskId,
-                location,
-                new ExchangeClientCallback(),
-                scheduledExecutor,
-                pageBufferClientCallbackExecutor);
-        allClients.put(location, client);
-        queuedClients.add(client);
+        switch (input) {
+            case DirectExchangeInput directExchangeInput -> {
+                taskId = directExchangeInput.getTaskId();
+                location = URI.create(directExchangeInput.getLocation());
+                checkArgument(!allClients.containsKey(location), "location already exist: %s", location);
+                checkState(!noMoreLocations, "No more locations already set");
+                buffer.addTask(taskId);
+                poller = new HttpPageBufferPoller(
+                        selfAddress,
+                        httpClient,
+                        dataIntegrityVerification,
+                        maxResponseSize,
+                        maxErrorDuration,
+                        acknowledgePages,
+                        taskId,
+                        location,
+                        this,
+                        scheduledExecutor,
+                        pageBufferClientCallbackExecutor);
+            }
+            case PassThroughExchangeInput passThroughExchangeInput -> {
+                taskId = passThroughExchangeInput.getTaskId();
+                int partitionId = passThroughExchangeInput.getPartitionId();
+                // Use a synthetic URI for local exchange (not actually used for HTTP)
+                location = URI.create(format("http://localhost/%s/%d", taskId, partitionId));
+                checkArgument(!allClients.containsKey(location), "location already exist: %s", location);
+                checkState(!noMoreLocations, "No more locations already set");
+                buffer.addTask(taskId);
+                poller = new LocalPageBufferPoller(
+                        sqlTaskManagerProvider.get(),
+                        taskId,
+                        passThroughExchangeInput.getPartitionId(),
+                        maxResponseSize,
+                        acknowledgePages,
+                        this,
+                        pageBufferClientCallbackExecutor);
+            }
+            default -> throw new IllegalStateException("Unexpected Exchange input: " + input);
+        }
+
+        allClients.put(location, poller);
+        queuedClients.add(poller);
 
         scheduleRequestIfNecessary();
     }
@@ -253,7 +289,7 @@ public class DirectExchangeClient
         }
         closed = true;
 
-        for (HttpPageBufferClient client : allClients.values()) {
+        for (PageBufferPoller client : allClients.values()) {
             closeQuietly(client);
         }
         try {
@@ -280,14 +316,14 @@ public class DirectExchangeClient
         }
 
         long reservedBytesForScheduledClients = runningClients.stream()
-                .mapToLong(HttpPageBufferClient::getAverageRequestSizeInBytes)
+                .mapToLong(PageBufferPoller::getAverageRequestSizeInBytes)
                 .sum();
         long projectedBytesToBeRequested = 0;
         int clientCount = 0;
 
-        Iterator<HttpPageBufferClient> clientIterator = queuedClients.iterator();
+        Iterator<PageBufferPoller> clientIterator = queuedClients.iterator();
         while (clientIterator.hasNext()) {
-            HttpPageBufferClient client = clientIterator.next();
+            PageBufferPoller client = clientIterator.next();
             if (projectedBytesToBeRequested >= neededBytes * concurrentRequestMultiplier - reservedBytesForScheduledClients) {
                 break;
             }
@@ -311,27 +347,31 @@ public class DirectExchangeClient
     }
 
     @VisibleForTesting
-    Set<HttpPageBufferClient> getQueuedClients()
+    Set<PageBufferPoller> getQueuedClients()
     {
         return queuedClients;
     }
 
     @VisibleForTesting
-    Set<HttpPageBufferClient> getRunningClients()
+    Set<PageBufferPoller> getRunningClients()
     {
         return runningClients;
     }
 
     @VisibleForTesting
-    Map<URI, HttpPageBufferClient> getAllClients()
+    Map<URI, PageBufferPoller> getAllClients()
     {
         return allClients;
     }
 
-    private boolean addPages(HttpPageBufferClient client, List<Slice> pages)
+    @Override
+    public boolean addPages(PageBufferPoller poller, List<Slice> pages)
     {
+        requireNonNull(poller, "poller is null");
+        requireNonNull(pages, "pages is null");
+
         // If client is already completed, addPages is a no-op
-        if (completedClients.contains(client)) {
+        if (completedClients.contains(poller)) {
             return false;
         }
 
@@ -342,7 +382,7 @@ public class DirectExchangeClient
                 responseSize += page.length();
             }
             // Buffer may already be closed at this point. In such situation the buffer is expected to simply ignore this call.
-            buffer.addPages(client.getRemoteTaskId(), pages);
+            buffer.addPages(poller.getRemoteTaskId(), pages);
             // updating retained memory might be expensive, therefore it needs to be updated outside of exclusive lock
             updateRetainedMemory();
         }
@@ -388,75 +428,47 @@ public class DirectExchangeClient
         }
     }
 
-    private synchronized void requestComplete(HttpPageBufferClient client)
+    @Override
+    public synchronized void requestComplete(PageBufferPoller poller)
     {
-        requestDuration.add(client.getLastRequestDurationMillis());
-        if (!completedClients.contains(client) && !queuedClients.contains(client)) {
-            queuedClients.add(client);
-            runningClients.remove(client);
+        requireNonNull(poller, "poller is null");
+        requestDuration.add(poller.getLastRequestDurationMillis());
+        if (!completedClients.contains(poller) && !queuedClients.contains(poller)) {
+            queuedClients.add(poller);
+            runningClients.remove(poller);
         }
         scheduleRequestIfNecessary();
     }
 
-    private synchronized void clientFinished(HttpPageBufferClient client)
+    @Override
+    public synchronized void clientFinished(PageBufferPoller poller)
     {
-        requireNonNull(client, "client is null");
-        if (completedClients.add(client)) {
-            runningClients.remove(client);
-            buffer.taskFinished(client.getRemoteTaskId());
+        requireNonNull(poller, "poller is null");
+        if (completedClients.add(poller)) {
+            runningClients.remove(poller);
+            buffer.taskFinished(poller.getRemoteTaskId());
         }
         scheduleRequestIfNecessary();
     }
 
-    private synchronized void clientFailed(HttpPageBufferClient client, Throwable cause)
+    @Override
+    public synchronized void clientFailed(PageBufferPoller poller, Throwable cause)
     {
-        requireNonNull(client, "client is null");
-        if (completedClients.add(client)) {
-            runningClients.remove(client);
-            buffer.taskFailed(client.getRemoteTaskId(), cause);
-            scheduledExecutor.execute(() -> taskFailureListener.onTaskFailed(client.getRemoteTaskId(), cause));
-            closeQuietly(client);
+        requireNonNull(poller, "poller is null");
+        requireNonNull(cause, "cause is null");
+        if (completedClients.add(poller)) {
+            runningClients.remove(poller);
+            buffer.taskFailed(poller.getRemoteTaskId(), cause);
+            scheduledExecutor.execute(() -> taskFailureListener.onTaskFailed(poller.getRemoteTaskId(), cause));
+            closeQuietly(poller);
         }
         scheduleRequestIfNecessary();
     }
 
-    private class ExchangeClientCallback
-            implements ClientCallback
-    {
-        @Override
-        public boolean addPages(HttpPageBufferClient client, List<Slice> pages)
-        {
-            requireNonNull(client, "client is null");
-            requireNonNull(pages, "pages is null");
-            return DirectExchangeClient.this.addPages(client, pages);
-        }
-
-        @Override
-        public void requestComplete(HttpPageBufferClient client)
-        {
-            requireNonNull(client, "client is null");
-            DirectExchangeClient.this.requestComplete(client);
-        }
-
-        @Override
-        public void clientFinished(HttpPageBufferClient client)
-        {
-            DirectExchangeClient.this.clientFinished(client);
-        }
-
-        @Override
-        public void clientFailed(HttpPageBufferClient client, Throwable cause)
-        {
-            requireNonNull(client, "client is null");
-            requireNonNull(cause, "cause is null");
-            DirectExchangeClient.this.clientFailed(client, cause);
-        }
-    }
-
-    private static void closeQuietly(HttpPageBufferClient client)
+    private static void closeQuietly(PageBufferPoller poller)
     {
         try {
-            client.close();
+            poller.close();
         }
         catch (RuntimeException e) {
             // ignored

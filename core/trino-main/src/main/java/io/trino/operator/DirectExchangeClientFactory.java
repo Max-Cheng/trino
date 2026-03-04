@@ -14,6 +14,7 @@
 package io.trino.operator;
 
 import com.google.inject.Inject;
+import com.google.inject.Provider;
 import io.airlift.concurrent.ThreadPoolExecutorMBean;
 import io.airlift.http.client.HttpClient;
 import io.airlift.http.client.HttpClientConfig;
@@ -25,6 +26,7 @@ import io.trino.FeaturesConfig;
 import io.trino.FeaturesConfig.DataIntegrityVerification;
 import io.trino.exchange.ExchangeManagerRegistry;
 import io.trino.exchange.ExchangeMetricsCollector;
+import io.trino.execution.SqlTaskManager;
 import io.trino.execution.TaskFailureListener;
 import io.trino.memory.context.LocalMemoryContext;
 import io.trino.spi.QueryId;
@@ -60,6 +62,7 @@ public class DirectExchangeClientFactory
     private final ExecutorService pageBufferClientCallbackExecutor;
     private final ExchangeManagerRegistry exchangeManagerRegistry;
     private final Optional<ExchangeMetricsCollector> exchangeMetricsCollector;
+    private final Provider<SqlTaskManager> sqlTaskManagerProvider;
 
     @Inject
     public DirectExchangeClientFactory(
@@ -70,7 +73,8 @@ public class DirectExchangeClientFactory
             @ForExchange HttpClientConfig httpClientConfig,
             @ForExchange ScheduledExecutorService scheduler,
             ExchangeManagerRegistry exchangeManagerRegistry,
-            Optional<ExchangeMetricsCollector> exchangeMetricsCollector)
+            Optional<ExchangeMetricsCollector> exchangeMetricsCollector,
+            Provider<SqlTaskManager> sqlTaskManagerProvider)
     {
         this(
                 nodeInfo,
@@ -86,7 +90,8 @@ public class DirectExchangeClientFactory
                 httpClient,
                 scheduler,
                 exchangeManagerRegistry,
-                exchangeMetricsCollector);
+                exchangeMetricsCollector,
+                sqlTaskManagerProvider);
     }
 
     public DirectExchangeClientFactory(
@@ -103,7 +108,8 @@ public class DirectExchangeClientFactory
             HttpClient httpClient,
             ScheduledExecutorService scheduler,
             ExchangeManagerRegistry exchangeManagerRegistry,
-            Optional<ExchangeMetricsCollector> exchangeMetricsCollector)
+            Optional<ExchangeMetricsCollector> exchangeMetricsCollector,
+            Provider<SqlTaskManager> sqlTaskManagerProvider)
     {
         this.nodeInfo = requireNonNull(nodeInfo, "nodeInfo is null");
         this.dataIntegrityVerification = requireNonNull(dataIntegrityVerification, "dataIntegrityVerification is null");
@@ -130,6 +136,7 @@ public class DirectExchangeClientFactory
         checkArgument(concurrentRequestMultiplier > 0, "concurrentRequestMultiplier must be at least 1: %s", concurrentRequestMultiplier);
         this.exchangeManagerRegistry = requireNonNull(exchangeManagerRegistry, "exchangeManagerRegistry is null");
         this.exchangeMetricsCollector = requireNonNull(exchangeMetricsCollector, "exchangeMetricsCollector is null");
+        this.sqlTaskManagerProvider = requireNonNull(sqlTaskManagerProvider, "sqlTaskManagerProvider is null");
     }
 
     @PreDestroy
@@ -181,6 +188,7 @@ public class DirectExchangeClientFactory
                 scheduler,
                 memoryContext,
                 pageBufferClientCallbackExecutor,
-                taskFailureListener);
+                taskFailureListener,
+                sqlTaskManagerProvider);
     }
 }

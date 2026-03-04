@@ -18,8 +18,6 @@ import io.airlift.slice.Slice;
 import io.trino.operator.DirectExchangeClient;
 import io.trino.operator.OperatorInfo;
 
-import java.net.URI;
-
 import static java.util.Objects.requireNonNull;
 
 public class DirectExchangeDataSource
@@ -53,8 +51,7 @@ public class DirectExchangeDataSource
     @Override
     public void addInput(ExchangeInput input)
     {
-        DirectExchangeInput exchangeInput = (DirectExchangeInput) input;
-        directExchangeClient.addLocation(exchangeInput.getTaskId(), URI.create(exchangeInput.getLocation()));
+        directExchangeClient.addInput(input);
     }
 
     @Override

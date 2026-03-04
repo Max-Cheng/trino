@@ -23,6 +23,7 @@ import com.google.errorprone.annotations.concurrent.GuardedBy;
 import io.airlift.log.Logger;
 import io.opentelemetry.api.trace.Span;
 import io.trino.exchange.DirectExchangeInput;
+import io.trino.exchange.PassThroughExchangeInput;
 import io.trino.execution.ExecutionFailureInfo;
 import io.trino.execution.RemoteTask;
 import io.trino.execution.SqlStage;
@@ -590,9 +591,21 @@ public class PipelinedStageExecution
 
     private static Split createExchangeSplit(RemoteTask sourceTask, RemoteTask destinationTask)
     {
-        // Fetch the results from the buffer assigned to the task based on id
+        // Check if source and destination tasks are on the same node
+        String sourceNodeId = sourceTask.getNodeId();
+        String destinationNodeId = destinationTask.getNodeId();
+        boolean isLocalExchange = sourceNodeId.equals(destinationNodeId);
+
+        if (isLocalExchange) {
+            int bufferId = destinationTask.getTaskId().partitionId();
+            return new Split(REMOTE_CATALOG_HANDLE, new RemoteSplit(new PassThroughExchangeInput(sourceTask.getTaskId(), bufferId)));
+        }
+
         URI exchangeLocation = sourceTask.getTaskStatus().self();
-        URI splitLocation = uriBuilderFrom(exchangeLocation).appendPath("results").appendPath(String.valueOf(destinationTask.getTaskId().partitionId())).build();
+        URI splitLocation = uriBuilderFrom(exchangeLocation)
+                .appendPath("results")
+                .appendPath(String.valueOf(destinationTask.getTaskId().partitionId()))
+                .build();
         return new Split(REMOTE_CATALOG_HANDLE, new RemoteSplit(new DirectExchangeInput(sourceTask.getTaskId(), splitLocation.toString())));
     }
 

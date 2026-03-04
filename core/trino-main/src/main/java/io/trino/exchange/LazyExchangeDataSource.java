@@ -121,7 +121,7 @@ public class LazyExchangeDataSource
             }
             ExchangeDataSource dataSource = delegate.get();
             if (dataSource == null) {
-                if (input instanceof DirectExchangeInput) {
+                if (input instanceof DirectExchangeInput || input instanceof PassThroughExchangeInput) {
                     DirectExchangeClient client = directExchangeClientSupplier.get(queryId, exchangeId, querySpan, systemMemoryContext, taskFailureListener, retryPolicy);
                     dataSource = new DirectExchangeDataSource(client);
                 }

@@ -108,7 +108,8 @@ public class TestExchangeOperator
                 scheduler,
                 memoryContext,
                 pageBufferClientCallbackExecutor,
-                taskFailureListener);
+                taskFailureListener,
+                null);
     }
 
     @AfterAll

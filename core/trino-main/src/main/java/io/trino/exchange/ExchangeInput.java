@@ -21,7 +21,8 @@ import com.fasterxml.jackson.annotation.JsonTypeInfo;
         property = "@type")
 @JsonSubTypes({
         @JsonSubTypes.Type(value = DirectExchangeInput.class, name = "direct"),
-        @JsonSubTypes.Type(value = SpoolingExchangeInput.class, name = "spool")})
+        @JsonSubTypes.Type(value = SpoolingExchangeInput.class, name = "spool"),
+        @JsonSubTypes.Type(value = PassThroughExchangeInput.class, name = "passthrough")})
 public interface ExchangeInput
 {
     long getRetainedSizeInBytes();

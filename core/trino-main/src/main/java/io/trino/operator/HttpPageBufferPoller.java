@@ -43,7 +43,6 @@ import io.trino.spi.TrinoTransportException;
 import jakarta.annotation.Nullable;
 
 import java.io.BufferedReader;
-import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.net.URI;
@@ -73,8 +72,8 @@ import static io.trino.TrinoMediaTypes.TRINO_PAGES_TYPE;
 import static io.trino.execution.buffer.PagesSerdeUtil.NO_CHECKSUM;
 import static io.trino.execution.buffer.PagesSerdeUtil.calculateChecksum;
 import static io.trino.execution.buffer.PagesSerdeUtil.readSerializedPages;
-import static io.trino.operator.HttpPageBufferClient.PagesResponse.createEmptyPagesResponse;
-import static io.trino.operator.HttpPageBufferClient.PagesResponse.createPagesResponse;
+import static io.trino.operator.HttpPageBufferPoller.PagesResponse.createEmptyPagesResponse;
+import static io.trino.operator.HttpPageBufferPoller.PagesResponse.createPagesResponse;
 import static io.trino.server.InternalHeaders.TRINO_BUFFER_COMPLETE;
 import static io.trino.server.InternalHeaders.TRINO_MAX_SIZE;
 import static io.trino.server.InternalHeaders.TRINO_PAGE_NEXT_TOKEN;
@@ -96,29 +95,10 @@ import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 
 @ThreadSafe
-public final class HttpPageBufferClient
-        implements Closeable
+public final class HttpPageBufferPoller
+        implements PageBufferPoller
 {
-    private static final Logger log = Logger.get(HttpPageBufferClient.class);
-
-    /**
-     * For each request, the addPage method will be called zero or more times,
-     * followed by either requestComplete or clientFinished (if buffer complete).  If the client is
-     * closed, requestComplete or bufferFinished may never be called.
-     * <p>
-     * <b>NOTE:</b> Implementations of this interface are not allowed to perform
-     * blocking operations.
-     */
-    public interface ClientCallback
-    {
-        boolean addPages(HttpPageBufferClient client, List<Slice> pages);
-
-        void requestComplete(HttpPageBufferClient client);
-
-        void clientFinished(HttpPageBufferClient client);
-
-        void clientFailed(HttpPageBufferClient client, Throwable cause);
-    }
+    private static final Logger log = Logger.get(HttpPageBufferPoller.class);
 
     private final String selfAddress;
     private final HttpClient httpClient;
@@ -127,7 +107,7 @@ public final class HttpPageBufferClient
     private final boolean acknowledgePages;
     private final TaskId remoteTaskId;
     private final URI location;
-    private final ClientCallback clientCallback;
+    private final PageBufferCallBack clientCallback;
     private final ScheduledExecutorService scheduledExecutor;
     private final Backoff backoff;
 
@@ -164,7 +144,7 @@ public final class HttpPageBufferClient
     private final Executor pageBufferClientCallbackExecutor;
     private final Ticker ticker;
 
-    public HttpPageBufferClient(
+    public HttpPageBufferPoller(
             String selfAddress,
             HttpClient httpClient,
             DataIntegrityVerification dataIntegrityVerification,
@@ -173,7 +153,7 @@ public final class HttpPageBufferClient
             boolean acknowledgePages,
             TaskId remoteTaskId,
             URI location,
-            ClientCallback clientCallback,
+            PageBufferCallBack clientCallback,
             ScheduledExecutorService scheduledExecutor,
             Executor pageBufferClientCallbackExecutor)
     {
@@ -192,7 +172,7 @@ public final class HttpPageBufferClient
                 pageBufferClientCallbackExecutor);
     }
 
-    public HttpPageBufferClient(
+    public HttpPageBufferPoller(
             String selfAddress,
             HttpClient httpClient,
             DataIntegrityVerification dataIntegrityVerification,
@@ -201,7 +181,7 @@ public final class HttpPageBufferClient
             boolean acknowledgePages,
             TaskId remoteTaskId,
             URI location,
-            ClientCallback clientCallback,
+            PageBufferCallBack clientCallback,
             ScheduledExecutorService scheduledExecutor,
             Ticker ticker,
             Executor pageBufferClientCallbackExecutor)
@@ -321,9 +301,9 @@ public final class HttpPageBufferClient
                 initiateRequest();
             }
             catch (Throwable t) {
-                assertNotHoldsLock(HttpPageBufferClient.this);
+                assertNotHoldsLock(this);
                 // should not happen, but be safe and fail the operator
-                clientCallback.clientFailed(HttpPageBufferClient.this, t);
+                clientCallback.clientFailed(this, t);
             }
         }, delayNanos, NANOSECONDS);
 
@@ -369,7 +349,7 @@ public final class HttpPageBufferClient
             @Override
             public void onSuccess(PagesResponse result)
             {
-                assertNotHoldsLock(HttpPageBufferClient.this);
+                assertNotHoldsLock(this);
                 lastRequestDurationMillis = (ticker.read() - lastRequestStartNanos) / 1_000_000;
                 backoff.success();
 
@@ -381,7 +361,7 @@ public final class HttpPageBufferClient
                     }
 
                     boolean shouldAcknowledge = false;
-                    synchronized (HttpPageBufferClient.this) {
+                    synchronized (HttpPageBufferPoller.this) {
                         if (taskInstanceId == null) {
                             taskInstanceId = result.getTaskInstanceId();
                         }
@@ -434,7 +414,7 @@ public final class HttpPageBufferClient
                     // clientCallback can keep stats of requests and responses. For example, it may
                     // keep track of how often a client returns empty response and adjust request
                     // frequency or buffer size.
-                    pagesAccepted = clientCallback.addPages(HttpPageBufferClient.this, pages);
+                    pagesAccepted = clientCallback.addPages(HttpPageBufferPoller.this, pages);
                 }
                 catch (TrinoException e) {
                     handleFailure(e, resultFuture);
@@ -458,7 +438,7 @@ public final class HttpPageBufferClient
                 long responseSize = pages.stream().mapToLong(Slice::length).sum();
                 requestSucceeded(responseSize);
 
-                synchronized (HttpPageBufferClient.this) {
+                synchronized (HttpPageBufferPoller.this) {
                     // client is complete, acknowledge it by sending it a delete in the next request
                     if (result.isClientComplete()) {
                         completed = true;
@@ -468,14 +448,14 @@ public final class HttpPageBufferClient
                     }
                     lastUpdate = Instant.now();
                 }
-                clientCallback.requestComplete(HttpPageBufferClient.this);
+                clientCallback.requestComplete(HttpPageBufferPoller.this);
             }
 
             @Override
             public void onFailure(Throwable t)
             {
                 log.debug("Request to %s failed %s", uri, t);
-                assertNotHoldsLock(HttpPageBufferClient.this);
+                assertNotHoldsLock(HttpPageBufferPoller.this);
 
                 lastRequestDurationMillis = (ticker.read() - lastRequestStartNanos) / 1_000_000;
 
@@ -527,7 +507,7 @@ public final class HttpPageBufferClient
             @Override
             public void onSuccess(@Nullable StatusResponse result)
             {
-                assertNotHoldsLock(HttpPageBufferClient.this);
+                assertNotHoldsLock(HttpPageBufferPoller.this);
 
                 if (result != null && result.getStatusCode() != NO_CONTENT.code()) {
                     onFailure(new TrinoTransportException(
@@ -538,7 +518,7 @@ public final class HttpPageBufferClient
                 }
 
                 backoff.success();
-                synchronized (HttpPageBufferClient.this) {
+                synchronized (HttpPageBufferPoller.this) {
                     closed = true;
                     if (future == resultFuture) {
                         future = null;
@@ -546,13 +526,13 @@ public final class HttpPageBufferClient
                     lastUpdate = Instant.now();
                 }
                 requestsCompleted.incrementAndGet();
-                clientCallback.clientFinished(HttpPageBufferClient.this);
+                clientCallback.clientFinished(HttpPageBufferPoller.this);
             }
 
             @Override
             public void onFailure(Throwable t)
             {
-                assertNotHoldsLock(HttpPageBufferClient.this);
+                assertNotHoldsLock(HttpPageBufferPoller.this);
 
                 log.error("Request to delete %s failed %s", location, t);
                 if (!(t instanceof TrinoException) && backoff.failure()) {
@@ -571,29 +551,29 @@ public final class HttpPageBufferClient
     @SuppressWarnings("checkstyle:IllegalToken")
     private static void assertNotHoldsLock(Object lock)
     {
-        // By design, clientCallback must not be called when holding a lock on HttpPageBufferClient.this.
+        // By design, clientCallback must not be called when holding a lock on HttpPageBufferPoller.this.
         // This check enforce the requirement and help reason about this invariant locally.
         assert !Thread.holdsLock(lock) : "Cannot execute this method while holding a lock";
     }
 
     private void handleFailure(Throwable t, HttpResponseFuture<?> expectedFuture)
     {
-        assertNotHoldsLock(HttpPageBufferClient.this);
+        assertNotHoldsLock(HttpPageBufferPoller.this);
 
         requestsFailed.incrementAndGet();
         requestsCompleted.incrementAndGet();
 
         if (t instanceof TrinoException) {
-            clientCallback.clientFailed(HttpPageBufferClient.this, t);
+            clientCallback.clientFailed(this, t);
         }
 
-        synchronized (HttpPageBufferClient.this) {
+        synchronized (HttpPageBufferPoller.this) {
             if (future == expectedFuture) {
                 future = null;
             }
             lastUpdate = Instant.now();
         }
-        clientCallback.requestComplete(HttpPageBufferClient.this);
+        clientCallback.requestComplete(HttpPageBufferPoller.this);
     }
 
     @Override
@@ -606,7 +586,7 @@ public final class HttpPageBufferClient
             return false;
         }
 
-        HttpPageBufferClient that = (HttpPageBufferClient) o;
+        HttpPageBufferPoller that = (HttpPageBufferPoller) o;
 
         return location.equals(that.location);
     }

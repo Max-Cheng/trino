@@ -16,7 +16,6 @@ package io.trino.operator;
 import com.google.common.io.Closer;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
-import io.trino.exchange.DirectExchangeInput;
 import io.trino.execution.buffer.PageDeserializer;
 import io.trino.execution.buffer.PagesSerdeFactory;
 import io.trino.memory.context.LocalMemoryContext;
@@ -32,7 +31,6 @@ import io.trino.util.Ciphers;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
-import java.net.URI;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -176,8 +174,7 @@ public class MergeOperator
         RemoteSplit remoteSplit = (RemoteSplit) split.getConnectorSplit();
         // Only fault tolerant execution mode is expected to execute external exchanges.
         // MergeOperator is used for distributed sort only and it is not compatible (and disabled) with fault tolerant execution mode.
-        DirectExchangeInput exchangeInput = (DirectExchangeInput) remoteSplit.getExchangeInput();
-        client.addLocation(exchangeInput.getTaskId(), URI.create(exchangeInput.getLocation()));
+        client.addInput(remoteSplit.getExchangeInput());
         client.noMoreLocations();
         pageProducers.add(client.pages()
                 .map(serializedPage -> {

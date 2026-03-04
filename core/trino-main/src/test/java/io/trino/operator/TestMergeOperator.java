@@ -106,7 +106,8 @@ public class TestMergeOperator
                 new HttpClientConfig(),
                 executor,
                 new ExchangeManagerRegistry(OpenTelemetry.noop(), Tracing.noopTracer(), new SecretsResolver(ImmutableMap.of()), new ExchangeManagerConfig()),
-                Optional.of(new ExchangeMetricsCollector(ImmutableList::of, Duration.ofMillis(1))));
+                Optional.of(new ExchangeMetricsCollector(ImmutableList::of, Duration.ofMillis(1))),
+                null);
         orderingCompiler = new OrderingCompiler(new TypeOperators());
     }
 
