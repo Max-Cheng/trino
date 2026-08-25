@@ -34,7 +34,9 @@ import io.trino.spi.Page;
 import io.trino.spi.block.ArrayBlockBuilder;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.DictionaryBlock;
 import io.trino.spi.block.MapBlockBuilder;
+import io.trino.spi.block.RunLengthEncodedBlock;
 import io.trino.spi.block.VariableWidthBlock;
 import io.trino.spi.block.VariableWidthBlockBuilder;
 import io.trino.spi.connector.SourcePage;
@@ -78,6 +80,7 @@ import static io.airlift.bytecode.Access.a;
 import static io.airlift.bytecode.Parameter.arg;
 import static io.airlift.bytecode.ParameterizedType.type;
 import static io.airlift.slice.Slices.allocate;
+import static io.trino.block.BlockAssertions.createLongsBlock;
 import static io.trino.block.BlockAssertions.createRepeatedValuesBlock;
 import static io.trino.block.BlockAssertions.createStringsBlock;
 import static io.trino.operator.scalar.ArrayTransformFunction.ARRAY_TRANSFORM_NAME;
@@ -104,6 +107,7 @@ import static io.trino.util.Reflection.constructorMethodHandle;
 import static io.trino.util.Reflection.field;
 import static io.trino.util.Reflection.methodHandle;
 import static java.lang.invoke.MethodHandles.insertArguments;
+import static java.util.Arrays.asList;
 import static java.util.Collections.nCopies;
 import static java.util.Objects.requireNonNull;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -296,6 +300,69 @@ public class TestPageFunctionCompiler
         Page page = createLongBlockPage(0);
         Block result = project(projection, page, SelectedPositions.positionsRange(0, page.getPositionCount()));
         assertThat(hiddenType.getObjectValue(result, 0)).isEqualTo(42);
+    }
+
+    @Test
+    public void testRowConstructorWithInputReferences()
+    {
+        RowType rowType = RowType.anonymous(ImmutableList.of(BIGINT, BIGINT));
+        Expression row = new Row(
+                ImmutableList.of(
+                        new Reference(BIGINT, "$col_0"),
+                        new Reference(BIGINT, "$col_1")),
+                rowType);
+        PageProjection projection = FUNCTION_RESOLUTION.getPageFunctionCompiler()
+                .compileProjection(
+                        row,
+                        ImmutableMap.of(
+                                new Symbol(BIGINT, "$col_0"), 0,
+                                new Symbol(BIGINT, "$col_1"), 1),
+                        SQL_STANDARD,
+                        Optional.empty())
+                .get();
+
+        Page page = new Page(
+                createLongsBlock(11L, null, 33L, 44L),
+                createLongsBlock(101L, 102L, null, 104L));
+        Block result = project(projection, page, SelectedPositions.positionsList(new int[] {3, 1, 0}, 0, 3));
+
+        assertThat(result.getPositionCount()).isEqualTo(3);
+        assertThat(rowType.getObjectValue(result, 0)).isEqualTo(asList(44L, 104L));
+        assertThat(rowType.getObjectValue(result, 1)).isEqualTo(asList(null, 102L));
+        assertThat(rowType.getObjectValue(result, 2)).isEqualTo(asList(11L, 101L));
+    }
+
+    @Test
+    public void testRowConstructorWithEncodedInputReferences()
+    {
+        RowType rowType = RowType.anonymous(ImmutableList.of(BIGINT, BIGINT, BIGINT));
+        Expression row = new Row(
+                ImmutableList.of(
+                        new Reference(BIGINT, "$col_0"),
+                        new Reference(BIGINT, "$col_1"),
+                        new Reference(BIGINT, "$col_2")),
+                rowType);
+        PageProjection projection = FUNCTION_RESOLUTION.getPageFunctionCompiler()
+                .compileProjection(
+                        row,
+                        ImmutableMap.of(
+                                new Symbol(BIGINT, "$col_0"), 0,
+                                new Symbol(BIGINT, "$col_1"), 1,
+                                new Symbol(BIGINT, "$col_2"), 2),
+                        SQL_STANDARD,
+                        Optional.empty())
+                .get();
+
+        Page page = new Page(
+                DictionaryBlock.create(5, createLongsBlock(10L, null, 30L), new int[] {2, 0, 1, 2, 0}),
+                RunLengthEncodedBlock.create(createLongsBlock(7), 5),
+                RunLengthEncodedBlock.create(createLongsBlock((Long) null), 5));
+        Block result = project(projection, page, SelectedPositions.positionsRange(1, 3));
+
+        assertThat(result.getPositionCount()).isEqualTo(3);
+        assertThat(rowType.getObjectValue(result, 0)).isEqualTo(asList(10L, 7L, null));
+        assertThat(rowType.getObjectValue(result, 1)).isEqualTo(asList(null, 7L, null));
+        assertThat(rowType.getObjectValue(result, 2)).isEqualTo(asList(30L, 7L, null));
     }
 
     @Test

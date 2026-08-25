@@ -46,6 +46,7 @@ import static io.airlift.bytecode.expression.BytecodeExpressions.constantNull;
 import static io.airlift.bytecode.expression.BytecodeExpressions.invokeStatic;
 import static io.airlift.bytecode.expression.BytecodeExpressions.newArray;
 import static io.airlift.bytecode.expression.BytecodeExpressions.newInstance;
+import static io.trino.sql.gen.InputReferenceCompiler.InputReferenceNode;
 import static io.trino.sql.gen.SqlTypeBytecodeExpression.constantType;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
@@ -81,7 +82,19 @@ public class RowConstructorCodeGenerator
         block.append(fieldBlocks.set(newArray(type(Block[].class), arguments.size())));
 
         Variable blockBuilder = scope.getOrCreateTempVariable(BlockBuilder.class);
+
         for (int i = 0; i < arguments.size(); ++i) {
+            BytecodeNode argument = context.generate(arguments.get(i));
+            if (argument instanceof InputReferenceNode inputReference) {
+                block.comment("Reuse input block for " + i + "-th field of row");
+                block.getVariable(fieldBlocks)
+                        .push(i)
+                        .append(inputReference.produceBlockAndPosition())
+                        .push(1)
+                        .invokeInterface(Block.class, "getRegion", Block.class, int.class, int.class)
+                        .putObjectArrayElement();
+                continue;
+            }
             Type fieldType = types.get(i);
 
             block.append(blockBuilder.set(constantType(binder, fieldType).invoke(
@@ -92,7 +105,7 @@ public class RowConstructorCodeGenerator
 
             block.comment("Clean wasNull and Generate + " + i + "-th field of row");
             block.append(context.wasNull().set(constantFalse()));
-            block.append(context.generate(arguments.get(i)));
+            block.append(argument);
             Variable field = scope.getOrCreateTempVariable(binder.getAccessibleType(fieldType.getJavaType()));
             block.putVariable(field);
             block.append(new IfStatement()
