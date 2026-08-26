@@ -132,8 +132,12 @@ public class RowConstructorCodeGenerator
         CallSiteBinder binder = context.getCallSiteBinder();
         Scope scope = context.getScope();
 
-        Variable fieldBuilders = scope.getOrCreateTempVariable(BlockBuilder[].class);
-        block.append(fieldBuilders.set(invokeStatic(RowConstructorCodeGenerator.class, "createFieldBlockBuildersForSingleRow", BlockBuilder[].class, constantType(binder, rowType))));
+        Variable rowConstructorState = scope.getOrCreateTempVariable(RowConstructorState.class);
+        block.append(rowConstructorState.set(invokeStatic(
+                RowConstructorCodeGenerator.class,
+                "createRowConstructorStateForSingleRow",
+                RowConstructorState.class,
+                constantType(binder, rowType))));
 
         int field = 0;
         while (field < arguments.size()) {
@@ -142,13 +146,13 @@ public class RowConstructorCodeGenerator
             for (Parameter argument : context.getContextArguments()) {
                 block.getVariable(argument);
             }
-            block.getVariable(fieldBuilders);
+            block.getVariable(rowConstructorState);
             block.invokeVirtual(partialRowConstructor.method());
             field = partialRowConstructor.nextField();
         }
 
-        block.append(invokeStatic(RowConstructorCodeGenerator.class, "createSqlRowFromFieldBuildersForSingleRow", SqlRow.class, fieldBuilders));
-        scope.releaseTempVariableForReuse(fieldBuilders);
+        block.append(invokeStatic(RowConstructorCodeGenerator.class, "createSqlRowFromFieldBlocksAndBuildersForSingleRow", SqlRow.class, rowConstructorState));
+        scope.releaseTempVariableForReuse(rowConstructorState);
         block.append(context.wasNull().set(constantFalse()));
         return block;
     }
@@ -158,10 +162,10 @@ public class RowConstructorCodeGenerator
         ClassDefinition classDefinition = parentContext.getClassDefinition();
         CallSiteBinder binder = parentContext.getCallSiteBinder();
 
-        Parameter fieldBuilders = arg("fieldBuilders", BlockBuilder[].class);
+        Parameter rowConstructorState = arg("rowConstructorState", RowConstructorState.class);
 
         List<Parameter> parameters = new ArrayList<>(parentContext.getContextArguments());
-        parameters.add(fieldBuilders);
+        parameters.add(rowConstructorState);
 
         MethodDefinition methodDefinition = classDefinition.declareMethod(
                 a(PUBLIC),
@@ -172,6 +176,11 @@ public class RowConstructorCodeGenerator
         Scope scope = methodDefinition.getScope();
         BytecodeBlock block = methodDefinition.getBody();
         scope.declareVariable("wasNull", block, constantFalse());
+
+        Variable fieldBuilders = scope.declareVariable(BlockBuilder[].class, "fieldBuilders");
+        Variable fieldBlocks = scope.declareVariable(Block[].class, "fieldBlocks");
+        block.append(fieldBuilders.set(rowConstructorState.invoke("fieldBuilders", BlockBuilder[].class)));
+        block.append(fieldBlocks.set(rowConstructorState.invoke("fieldBlocks", Block[].class)));
 
         BytecodeGeneratorContext context = new BytecodeGeneratorContext(
                 parentContext.getExpressionCompiler(),
@@ -191,21 +200,33 @@ public class RowConstructorCodeGenerator
         int field = start;
         while (field < arguments.size()) {
             Type fieldType = types.get(field);
+            BytecodeNode argument = context.generate(arguments.get(field));
 
             BytecodeBlock fieldInitialization = new BytecodeBlock();
-            fieldInitialization.append(blockBuilder.set(fieldBuilders.getElement(constantInt(field))));
 
-            fieldInitialization.comment("Clean wasNull and Generate + " + field + "-th field of row");
+            if (argument instanceof InputReferenceNode inputReference) {
+                fieldInitialization.comment("Reuse input block for " + field + "-th field of row");
+                fieldInitialization.append(fieldBlocks)
+                        .push(field)
+                        .append(inputReference.produceBlockAndPosition())
+                        .push(1)
+                        .invokeInterface(Block.class, "getRegion", Block.class, int.class, int.class)
+                        .putObjectArrayElement();
+            }
+            else {
+                fieldInitialization.append(blockBuilder.set(fieldBuilders.getElement(constantInt(field))));
+                fieldInitialization.comment("Clean wasNull and Generate + " + field + "-th field of row");
 
-            fieldInitialization.append(context.wasNull().set(constantFalse()));
-            fieldInitialization.append(context.generate(arguments.get(field)));
-            Variable fieldVariable = scope.getOrCreateTempVariable(binder.getAccessibleType(fieldType.getJavaType()));
-            fieldInitialization.putVariable(fieldVariable);
-            fieldInitialization.append(new IfStatement()
-                    .condition(context.wasNull())
-                    .ifTrue(blockBuilder.invoke("appendNull", BlockBuilder.class).pop())
-                    .ifFalse(constantType(binder, fieldType).writeValue(blockBuilder, fieldVariable).pop()));
-            scope.releaseTempVariableForReuse(fieldVariable);
+                fieldInitialization.append(context.wasNull().set(constantFalse()));
+                fieldInitialization.append(argument);
+                Variable fieldVariable = scope.getOrCreateTempVariable(binder.getAccessibleType(fieldType.getJavaType()));
+                fieldInitialization.putVariable(fieldVariable);
+                fieldInitialization.append(new IfStatement()
+                        .condition(context.wasNull())
+                        .ifTrue(blockBuilder.invoke("appendNull", BlockBuilder.class).pop())
+                        .ifFalse(constantType(binder, fieldType).writeValue(blockBuilder, fieldVariable).pop()));
+                scope.releaseTempVariableForReuse(fieldVariable);
+            }
 
             BytecodeBlock candidate = new BytecodeBlock()
                     .append(block)
@@ -237,6 +258,15 @@ public class RowConstructorCodeGenerator
 
     private record PartialRowConstructor(MethodDefinition method, int nextField) {}
 
+    public record RowConstructorState(BlockBuilder[] fieldBuilders, Block[] fieldBlocks) {}
+
+    @UsedByGeneratedCode
+    public static RowConstructorState createRowConstructorStateForSingleRow(Type type)
+    {
+        BlockBuilder[] fieldBuilders = createFieldBlockBuildersForSingleRow(type);
+        return new RowConstructorState(fieldBuilders, new Block[fieldBuilders.length]);
+    }
+
     @UsedByGeneratedCode
     public static BlockBuilder[] createFieldBlockBuildersForSingleRow(Type type)
     {
@@ -252,13 +282,19 @@ public class RowConstructorCodeGenerator
     }
 
     @UsedByGeneratedCode
-    public static SqlRow createSqlRowFromFieldBuildersForSingleRow(BlockBuilder[] fieldBuilders)
+    public static SqlRow createSqlRowFromFieldBlocksAndBuildersForSingleRow(RowConstructorState rowConstructorState)
     {
-        Block[] fieldBlocks = new Block[fieldBuilders.length];
+        BlockBuilder[] fieldBuilders = rowConstructorState.fieldBuilders();
+        Block[] fieldBlocks = rowConstructorState.fieldBlocks();
+        if (fieldBuilders.length != fieldBlocks.length) {
+            throw new IllegalArgumentException(format("field builders and field blocks must have the same size: %s != %s", fieldBuilders.length, fieldBlocks.length));
+        }
         for (int i = 0; i < fieldBuilders.length; i++) {
-            fieldBlocks[i] = fieldBuilders[i].build();
+            if (fieldBlocks[i] == null) {
+                fieldBlocks[i] = fieldBuilders[i].build();
+            }
             if (fieldBlocks[i].getPositionCount() != 1) {
-                throw new IllegalArgumentException(format("builder must only contain a single position, found: %s positions", fieldBlocks[i].getPositionCount()));
+                throw new IllegalArgumentException(format("field block must only contain a single position, found: %s positions", fieldBlocks[i].getPositionCount()));
             }
         }
         return new SqlRow(0, fieldBlocks);
