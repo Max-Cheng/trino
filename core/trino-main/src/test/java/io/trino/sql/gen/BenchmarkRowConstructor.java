@@ -24,6 +24,7 @@ import io.trino.spi.block.Block;
 import io.trino.spi.connector.SourcePage;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
+import io.trino.sql.ir.Coalesce;
 import io.trino.sql.ir.Expression;
 import io.trino.sql.ir.Reference;
 import io.trino.sql.ir.Row;
@@ -43,8 +44,8 @@ import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.profile.GCProfiler;
 import org.openjdk.jmh.runner.RunnerException;
 
+import java.util.List;
 import java.util.Optional;
-import java.util.concurrent.TimeUnit;
 
 import static io.trino.jmh.Benchmarks.benchmark;
 import static io.trino.spi.type.BigintType.BIGINT;
@@ -58,8 +59,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 @State(Scope.Thread)
 @OutputTimeUnit(MICROSECONDS)
 @Fork(2)
-@Warmup(iterations = 5, time = 500, timeUnit = TimeUnit.MILLISECONDS)
-@Measurement(iterations = 5, time = 500, timeUnit = TimeUnit.MILLISECONDS)
+@Warmup(iterations = 10)
+@Measurement(iterations = 10)
 @BenchmarkMode(Mode.AverageTime)
 public class BenchmarkRowConstructor
 {
@@ -70,6 +71,9 @@ public class BenchmarkRowConstructor
 
     @Param({"bigint", "varchar"})
     private String type = "bigint";
+
+    @Param({"direct", "all-computed", "mixed"})
+    private String expressionShape = "direct";
 
     private PageProjection projection;
     private SourcePage inputPage;
@@ -87,7 +91,7 @@ public class BenchmarkRowConstructor
         String inputName = "$col_0";
         Symbol inputSymbol = new Symbol(fieldType, inputName);
         Expression input = new Reference(fieldType, inputName);
-        Row row = new Row(nCopies(fieldCount, input), RowType.anonymous(nCopies(fieldCount, fieldType)));
+        Row row = new Row(createFields(input), RowType.anonymous(nCopies(fieldCount, fieldType)));
 
         TestingFunctionResolution functionResolution = new TestingFunctionResolution();
         projection = functionResolution.getPageFunctionCompiler()
@@ -99,6 +103,23 @@ public class BenchmarkRowConstructor
         selectedPositions = SelectedPositions.positionsRange(0, POSITION_COUNT);
     }
 
+    private List<Expression> createFields(Expression input)
+    {
+        Expression computedInput = new Coalesce(input, input);
+        return switch (expressionShape) {
+            case "direct" -> nCopies(fieldCount, input);
+            case "all-computed" -> nCopies(fieldCount, computedInput);
+            case "mixed" -> {
+                ImmutableList.Builder<Expression> fields = ImmutableList.builderWithExpectedSize(fieldCount);
+                for (int field = 0; field < fieldCount; field++) {
+                    fields.add(field % 2 == 0 ? input : computedInput);
+                }
+                yield fields.build();
+            }
+            default -> throw new IllegalArgumentException("Unsupported expression shape: " + expressionShape);
+        };
+    }
+
     @Benchmark
     public Block project()
     {
@@ -108,12 +129,15 @@ public class BenchmarkRowConstructor
     @Test
     void testBenchmark()
     {
-        for (String type : ImmutableList.of("bigint", "varchar")) {
-            this.type = type;
-            for (int fieldCount : ImmutableList.of(8, 64, 65)) {
-                this.fieldCount = fieldCount;
-                setup();
-                assertThat(project().getPositionCount()).isEqualTo(POSITION_COUNT);
+        for (String expressionShape : ImmutableList.of("direct", "all-computed", "mixed")) {
+            this.expressionShape = expressionShape;
+            for (String type : ImmutableList.of("bigint", "varchar")) {
+                this.type = type;
+                for (int fieldCount : ImmutableList.of(8, 64, 65)) {
+                    this.fieldCount = fieldCount;
+                    setup();
+                    assertThat(project().getPositionCount()).isEqualTo(POSITION_COUNT);
+                }
             }
         }
     }
