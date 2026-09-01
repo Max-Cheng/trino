@@ -66,8 +66,8 @@ public class BenchmarkRowConstructor
 {
     private static final int POSITION_COUNT = 1024;
 
-    @Param({"8", "64", "65"})
-    private int fieldCount = 8;
+    @Param({"16", "32", "48", "64", "80"})
+    private int fieldCount = 16;
 
     @Param({"bigint", "varchar"})
     private String type = "bigint";
@@ -133,7 +133,7 @@ public class BenchmarkRowConstructor
             this.expressionShape = expressionShape;
             for (String type : ImmutableList.of("bigint", "varchar")) {
                 this.type = type;
-                for (int fieldCount : ImmutableList.of(8, 64, 65)) {
+                for (int fieldCount : ImmutableList.of(16, 32, 48, 64, 80)) {
                     this.fieldCount = fieldCount;
                     setup();
                     assertThat(project().getPositionCount()).isEqualTo(POSITION_COUNT);
