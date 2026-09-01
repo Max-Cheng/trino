@@ -89,7 +89,7 @@ public class RowConstructorCodeGenerator
                 block.comment("Reuse input block for " + i + "-th field of row");
                 block.getVariable(fieldBlocks)
                         .push(i)
-                        .append(inputReference.produceBlockAndPosition())
+                        .append(inputReference.produceValueBlockAndPosition())
                         .push(1)
                         .invokeInterface(Block.class, "getRegion", Block.class, int.class, int.class)
                         .putObjectArrayElement();
@@ -197,7 +197,7 @@ public class RowConstructorCodeGenerator
                 fieldInitialization.comment("Reuse input block for " + field + "-th field of row");
                 fieldInitialization.append(fieldBlocks)
                         .push(field)
-                        .append(inputReference.produceBlockAndPosition())
+                        .append(inputReference.produceValueBlockAndPosition())
                         .push(1)
                         .invokeInterface(Block.class, "getRegion", Block.class, int.class, int.class)
                         .putObjectArrayElement();
